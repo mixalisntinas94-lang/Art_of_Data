@@ -32,6 +32,14 @@ async function fetchJira(endpointRoute, options = {}) {
 }
 
 /**
+ * In-memory module cache for Story Point field IDs.
+ * Persists across warm Forge container invocations to avoid repeated /rest/api/3/field API requests.
+ */
+let cachedStoryPointFields = null;
+let lastFieldCacheTime = 0;
+const FIELD_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour TTL
+
+/**
  * Helper to dynamically discover the custom field ID(s) used for Story Points in the Jira instance.
  *
  * Why this is necessary:
@@ -45,6 +53,11 @@ async function fetchJira(endpointRoute, options = {}) {
  * @returns {Promise<string[]>} - Array of field IDs corresponding to Story Points.
  */
 async function getStoryPointFieldIds() {
+  const now = Date.now();
+  if (cachedStoryPointFields && now - lastFieldCacheTime < FIELD_CACHE_TTL_MS) {
+    return cachedStoryPointFields;
+  }
+
   const detectedFieldIds = new Set(['customfield_10016', 'customfield_10026', 'customfield_10028']);
 
   try {
@@ -61,11 +74,136 @@ async function getStoryPointFieldIds() {
         }
       });
     }
+    cachedStoryPointFields = Array.from(detectedFieldIds);
+    lastFieldCacheTime = now;
   } catch (err) {
     console.warn('Could not dynamically retrieve Jira fields list; continuing with fallback field IDs:', err.message);
+    if (cachedStoryPointFields) {
+      return cachedStoryPointFields;
+    }
   }
 
-  return Array.from(detectedFieldIds);
+  return cachedStoryPointFields || Array.from(detectedFieldIds);
+}
+
+/**
+ * Helper to fetch Jira issues with automatic pagination.
+ * Loops through pages of 100 issues up to maxTotalIssues (default 1000).
+ * Supports Jira Cloud v3 cursor pagination (nextPageToken) as well as offset pagination (startAt).
+ *
+ * @param {string} jql - JQL query string.
+ * @param {string[]} fieldsList - Array of fields to return.
+ * @param {number} maxTotalIssues - Maximum issues to fetch before stopping (defaults to 1000).
+ * @returns {Promise<{ issues: Array, totalFound: number, isTruncated: boolean }>}
+ */
+async function fetchAllIssues(jql, fieldsList, maxTotalIssues = 1000) {
+  const PAGE_SIZE = 100;
+  const allIssues = [];
+  let nextPageToken = null;
+  let startAt = 0;
+  let totalFound = 0;
+  let hasMore = true;
+
+  let searchError = null;
+
+  while (hasMore && allIssues.length < maxTotalIssues) {
+    let pageData = null;
+
+    // Strategy 1: Modern Jira Cloud v3 search endpoint with nextPageToken / startAt
+    try {
+      const requestBody = {
+        jql,
+        maxResults: PAGE_SIZE,
+        fields: fieldsList,
+      };
+
+      if (nextPageToken) {
+        requestBody.nextPageToken = nextPageToken;
+      } else if (startAt > 0) {
+        requestBody.startAt = startAt;
+      }
+
+      pageData = await fetchJira(route`/rest/api/3/search/jql`, {
+        method: 'POST',
+        headers: {
+          'Accept': 'application/json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(requestBody),
+      });
+    } catch (postErr) {
+      searchError = postErr;
+      // Strategy 2: Fallback to classic POST /rest/api/3/search
+      try {
+        pageData = await fetchJira(route`/rest/api/3/search`, {
+          method: 'POST',
+          headers: {
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            jql,
+            startAt,
+            maxResults: PAGE_SIZE,
+            fields: fieldsList,
+          }),
+        });
+      } catch (fallbackPostErr) {
+        searchError = fallbackPostErr;
+        // Strategy 3: Fallback to GET /rest/api/3/search
+        try {
+          const fieldsStr = fieldsList.join(',');
+          pageData = await fetchJira(
+            route`/rest/api/3/search?jql=${jql}&startAt=${startAt}&maxResults=${PAGE_SIZE}&fields=${fieldsStr}`
+          );
+        } catch (getErr) {
+          searchError = getErr;
+          console.error('Failed to fetch page of issues in pagination loop:', getErr.message);
+          break;
+        }
+      }
+    }
+
+    // If on the very first page no data was returned due to an error, surface the error
+    if (!pageData && allIssues.length === 0 && searchError) {
+      throw new Error(`Jira search query failed: ${searchError.message}`);
+    }
+
+    const currentBatch = pageData?.issues || [];
+    if (!currentBatch.length) {
+      break;
+    }
+
+    allIssues.push(...currentBatch);
+
+    // Track total in Jira
+    if (typeof pageData.total === 'number') {
+      totalFound = pageData.total;
+    } else if (typeof pageData.totalCount === 'number') {
+      totalFound = pageData.totalCount;
+    } else {
+      totalFound = Math.max(totalFound, allIssues.length);
+    }
+
+    // Determine if more pages exist
+    if (pageData.nextPageToken) {
+      nextPageToken = pageData.nextPageToken;
+      hasMore = !pageData.isLast && allIssues.length < totalFound;
+    } else {
+      startAt += currentBatch.length;
+      hasMore = currentBatch.length === PAGE_SIZE && allIssues.length < totalFound;
+    }
+
+    if (pageData.isLast === true) {
+      hasMore = false;
+    }
+  }
+
+  return {
+    issues: allIssues,
+    totalFound: totalFound || allIssues.length,
+    isTruncated: totalFound > allIssues.length,
+  };
 }
 
 /**
@@ -210,6 +348,72 @@ resolver.define('getProjectFilterOptions', async (req) => {
 });
 
 /**
+ * Resolver: getJqlAutocompleteData
+ * Fetches JQL field names, functions, and reserved words from Jira's autocompletedata API.
+ * Provides rich suggestions when users type custom JQL in the JQL filter tab.
+ */
+resolver.define('getJqlAutocompleteData', async () => {
+  try {
+    const data = await fetchJira(route`/rest/api/3/jql/autocompletedata`);
+    return {
+      success: true,
+      visibleFieldNames: data.visibleFieldNames || [],
+      visibleFunctionNames: data.visibleFunctionNames || [],
+      jqlReservedWords: data.jqlReservedWords || [],
+    };
+  } catch (err) {
+    console.warn('Could not fetch remote JQL autocomplete data, using comprehensive fallback:', err.message);
+    return {
+      success: true, // provide graceful fallback data
+      visibleFieldNames: [
+        { value: 'assignee', displayName: 'Assignee' },
+        { value: 'status', displayName: 'Status' },
+        { value: 'issuetype', displayName: 'Issue Type' },
+        { value: 'priority', displayName: 'Priority' },
+        { value: 'sprint', displayName: 'Sprint' },
+        { value: 'labels', displayName: 'Labels' },
+        { value: 'component', displayName: 'Component' },
+        { value: 'fixVersion', displayName: 'Fix Version' },
+        { value: 'resolution', displayName: 'Resolution' },
+        { value: 'reporter', displayName: 'Reporter' },
+        { value: 'created', displayName: 'Created Date' },
+        { value: 'updated', displayName: 'Updated Date' },
+        { value: 'summary', displayName: 'Summary' },
+        { value: 'description', displayName: 'Description' },
+        { value: 'parent', displayName: 'Parent' },
+      ],
+      visibleFunctionNames: [
+        { value: 'currentUser()', displayName: 'currentUser()' },
+        { value: 'openSprints()', displayName: 'openSprints()' },
+        { value: 'futureSprints()', displayName: 'futureSprints()' },
+        { value: 'closedSprints()', displayName: 'closedSprints()' },
+        { value: 'now()', displayName: 'now()' },
+        { value: 'startOfDay()', displayName: 'startOfDay()' },
+        { value: 'endOfDay()', displayName: 'endOfDay()' },
+        { value: 'startOfWeek()', displayName: 'startOfWeek()' },
+        { value: 'endOfWeek()', displayName: 'endOfWeek()' },
+        { value: 'startOfMonth()', displayName: 'startOfMonth()' },
+        { value: 'endOfMonth()', displayName: 'endOfMonth()' },
+      ],
+      jqlReservedWords: [
+        'AND',
+        'OR',
+        'NOT',
+        'IN',
+        'IS',
+        'EMPTY',
+        'NULL',
+        'ORDER BY',
+        'ASC',
+        'DESC',
+        'WAS',
+        'CHANGED',
+      ],
+    };
+  }
+});
+
+/**
  * Resolver: getProjectAnalytics
  * Analyzes sprint & team metrics for a specific project.
  * Supports dynamic filtering by assignee, sprint, issue type, status, priority, and custom JQL!
@@ -283,11 +487,21 @@ resolver.define('getProjectAnalytics', async (req) => {
     }
 
     // Custom JQL clause filter (allows arbitrary user JQL filters like labels, components, etc.)
+    let customOrderBy = 'ORDER BY updated DESC';
     if (customJql && customJql.trim()) {
-      jqlClauses.push(`(${customJql.trim()})`);
+      let rawClause = customJql.trim();
+      // Match and extract trailing ORDER BY if user provided one in customJql
+      const orderMatch = rawClause.match(/\s+order\s+by\s+(.+)$/i);
+      if (orderMatch) {
+        customOrderBy = `ORDER BY ${orderMatch[1].trim()}`;
+        rawClause = rawClause.substring(0, orderMatch.index).trim();
+      }
+      if (rawClause) {
+        jqlClauses.push(`(${rawClause})`);
+      }
     }
 
-    const jql = `${jqlClauses.join(' AND ')} ORDER BY updated DESC`;
+    const jql = `${jqlClauses.join(' AND ')} ${customOrderBy}`;
 
     const fieldsList = [
       'summary',
@@ -304,29 +518,8 @@ resolver.define('getProjectAnalytics', async (req) => {
       ...storyPointFieldIds,
     ];
 
-    let data;
-    try {
-      data = await fetchJira(route`/rest/api/3/search/jql`, {
-        method: 'POST',
-        headers: {
-          'Accept': 'application/json',
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          jql,
-          maxResults: 100,
-          fields: fieldsList,
-        }),
-      });
-    } catch (postErr) {
-      // Fallback to GET /rest/api/3/search/jql if POST fails
-      const fieldsStr = fieldsList.join(',');
-      data = await fetchJira(
-        route`/rest/api/3/search/jql?jql=${jql}&maxResults=100&fields=${fieldsStr}`
-      );
-    }
-
-    const issues = data.issues || [];
+    // Fetch all matching issues using paginated search (up to 1,000 issues)
+    const { issues, totalFound, isTruncated } = await fetchAllIssues(jql, fieldsList, 1000);
     const now = Date.now();
 
     // 3. KPI Aggregations (tracking both Story Points & Time/Hours)
@@ -616,6 +809,8 @@ resolver.define('getProjectAnalytics', async (req) => {
       success: true,
       projectKey,
       appliedJql: jql,
+      totalFound,
+      isTruncated,
       kpis: {
         totalIssues,
         completedCount,

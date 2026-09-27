@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import ForgeReconciler, {
   Box,
   Stack,
@@ -22,6 +22,8 @@ import ForgeReconciler, {
   CodeBlock,
   Strong,
   Em,
+  Tag,
+  TagGroup,
   useProductContext,
   xcss,
   PieChart,
@@ -74,6 +76,30 @@ const filterToolbarStyle = xcss({
   boxShadow: 'elevation.shadow.raised',
 });
 
+const filterPanelContainerStyle = xcss({
+  backgroundColor: 'elevation.surface.overlay',
+  borderColor: 'color.border',
+  borderWidth: 'border.width',
+  borderStyle: 'solid',
+  borderRadius: 'radius.large',
+  padding: 'space.200',
+  boxShadow: 'elevation.shadow.overlay',
+});
+
+const filterLeftColStyle = xcss({
+  borderColor: 'color.border',
+  borderRightWidth: 'border.width',
+  borderRightStyle: 'solid',
+  paddingRight: 'space.150',
+  minWidth: '200px',
+});
+
+const filterRightColStyle = xcss({
+  paddingLeft: 'space.200',
+  flexGrow: 1,
+  minHeight: '220px',
+});
+
 /**
  * Main application component for Agile Pulse Analytics.
  * Built using native Atlassian Forge UI Kit components (@forge/react).
@@ -94,19 +120,65 @@ const App = () => {
   const [metricMode, setMetricMode] = useState('points');
 
   // Dynamic Filters State
-  const [searchQuery, setSearchQuery] = useState('');
   const [selectedAssignee, setSelectedAssignee] = useState('all');
   const [selectedIssueType, setSelectedIssueType] = useState('all');
   const [selectedStatus, setSelectedStatus] = useState('all');
+  const [selectedPriority, setSelectedPriority] = useState('all');
+  const [selectedSprint, setSelectedSprint] = useState('all');
   const [customJql, setCustomJql] = useState('');
-  const [showAdvancedJql, setShowAdvancedJql] = useState(false);
+  const [jqlDraft, setJqlDraft] = useState(''); // draft text before user hits Apply
+
+  // Filter panel state: open/closed, active tab ('basic' or 'jql'), and selected field on left
+  const [filterPanelOpen, setFilterPanelOpen] = useState(false);
+  const [filterTab, setFilterTab] = useState('basic'); // 'basic' or 'jql'
+  const [activeFilterField, setActiveFilterField] = useState('sprint'); // 'sprint' | 'assignee' | 'status' | 'issueType' | 'priority'
+  const [activeFieldList, setActiveFieldList] = useState(['sprint', 'assignee', 'status', 'issueType', 'priority']);
+  const [showAddFieldSelect, setShowAddFieldSelect] = useState(false);
+
+  // JQL Autocomplete dictionary from Jira
+  const [jqlAutocompleteData, setJqlAutocompleteData] = useState({
+    visibleFieldNames: [],
+    visibleFunctionNames: [],
+    jqlReservedWords: [],
+  });
 
   // Dynamic filter options populated from project
   const [filterOptions, setFilterOptions] = useState({
     assignees: [{ label: 'All Assignees', value: 'all' }],
     issueTypes: [{ label: 'All Issue Types', value: 'all' }],
     statuses: [{ label: 'All Statuses', value: 'all' }],
+    priorities: [{ label: 'All Priorities', value: 'all' }],
+    sprints: [{ label: 'All Sprints', value: 'all' }],
   });
+
+  // Ref to track active request counter and prevent out-of-order race conditions
+  const activeRequestIdRef = useRef(0);
+  // Ref to debounce rapid filter changes
+  const debounceTimerRef = useRef(null);
+
+  // Fetch JQL autocomplete schema on initial mount
+  useEffect(() => {
+    invoke('getJqlAutocompleteData')
+      .then((res) => {
+        if (res && res.success) {
+          setJqlAutocompleteData({
+            visibleFieldNames: res.visibleFieldNames || [],
+            visibleFunctionNames: res.visibleFunctionNames || [],
+            jqlReservedWords: res.jqlReservedWords || [],
+          });
+        }
+      })
+      .catch((err) => console.warn('Could not load JQL autocomplete data:', err.message));
+  }, []);
+
+  // Clear debounce timer on unmount
+  useEffect(() => {
+    return () => {
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+      }
+    };
+  }, []);
 
   /**
    * Loads accessible Jira projects from the backend resolver.
@@ -152,6 +224,8 @@ const App = () => {
           assignees: res.assignees || [{ label: 'All Assignees', value: 'all' }],
           issueTypes: res.issueTypes || [{ label: 'All Issue Types', value: 'all' }],
           statuses: res.statuses || [{ label: 'All Statuses', value: 'all' }],
+          priorities: res.priorities || [{ label: 'All Priorities', value: 'all' }],
+          sprints: res.sprints || [{ label: 'All Sprints', value: 'all' }],
         });
       }
     } catch (err) {
@@ -161,28 +235,38 @@ const App = () => {
 
   /**
    * Loads analytics for the selected project applying all active dynamic filters.
+   * Uses activeRequestIdRef to discard any responses from earlier requests that arrive late.
    */
   const loadAnalytics = useCallback(
     async (projectKey, overrideFilters = {}) => {
       if (!projectKey) return;
+      const currentRequestId = ++activeRequestIdRef.current;
       setLoadingAnalytics(true);
       setError(null);
       try {
         const payload = {
           projectKey,
-          searchQuery:
-            overrideFilters.searchQuery !== undefined ? overrideFilters.searchQuery : searchQuery,
           assignee:
             overrideFilters.assignee !== undefined ? overrideFilters.assignee : selectedAssignee,
           issueType:
             overrideFilters.issueType !== undefined ? overrideFilters.issueType : selectedIssueType,
           status:
             overrideFilters.status !== undefined ? overrideFilters.status : selectedStatus,
+          priority:
+            overrideFilters.priority !== undefined ? overrideFilters.priority : selectedPriority,
+          sprint:
+            overrideFilters.sprint !== undefined ? overrideFilters.sprint : selectedSprint,
           customJql:
             overrideFilters.customJql !== undefined ? overrideFilters.customJql : customJql,
         };
 
         const res = await invoke('getProjectAnalytics', payload);
+
+        // Discard result if another newer request was dispatched while this was in-flight
+        if (activeRequestIdRef.current !== currentRequestId) {
+          return;
+        }
+
         if (res.success) {
           setAnalytics(res);
           setLastRefreshed(new Date().toLocaleTimeString());
@@ -191,13 +275,33 @@ const App = () => {
           setAnalytics(null);
         }
       } catch (err) {
-        setError(`Error fetching analytics: ${err.message}`);
-        setAnalytics(null);
+        if (activeRequestIdRef.current === currentRequestId) {
+          setError(`Error fetching analytics: ${err.message}`);
+          setAnalytics(null);
+        }
       } finally {
-        setLoadingAnalytics(false);
+        if (activeRequestIdRef.current === currentRequestId) {
+          setLoadingAnalytics(false);
+        }
       }
     },
-    [searchQuery, selectedAssignee, selectedIssueType, selectedStatus, customJql]
+    [selectedAssignee, selectedIssueType, selectedStatus, selectedPriority, selectedSprint, customJql]
+  );
+
+  /**
+   * Debounced version of loadAnalytics for filter dropdowns.
+   * Cancels any pending requests and waits for delayMs before querying the backend.
+   */
+  const debouncedLoadAnalytics = useCallback(
+    (projectKey, overrideFilters = {}, delayMs = 300) => {
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+      }
+      debounceTimerRef.current = setTimeout(() => {
+        loadAnalytics(projectKey, overrideFilters);
+      }, delayMs);
+    },
+    [loadAnalytics]
   );
 
   // Initial load of Jira projects
@@ -205,24 +309,36 @@ const App = () => {
     loadProjects();
   }, [loadProjects]);
 
-  // When selected project changes, fetch filter options and reload analytics
+  // When selected project changes, fetch filter options and reload analytics immediately
   useEffect(() => {
     if (selectedProject?.key) {
       loadFilterOptions(selectedProject.key);
-      loadAnalytics(selectedProject.key);
+      loadAnalytics(selectedProject.key, {
+        searchQuery: '',
+        assignee: 'all',
+        issueType: 'all',
+        status: 'all',
+        customJql: '',
+      });
     }
-  }, [selectedProject, loadFilterOptions, loadAnalytics]);
+  }, [selectedProject?.key, loadFilterOptions]);
 
   const handleProjectSelect = (option) => {
     if (!option) return;
     const proj = projects.find((p) => p.key === option.value);
     if (proj) {
-      // Reset active filters when changing project
-      setSearchQuery('');
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+      }
+      // Reset all active filters when changing project
       setSelectedAssignee('all');
       setSelectedIssueType('all');
       setSelectedStatus('all');
+      setSelectedPriority('all');
+      setSelectedSprint('all');
       setCustomJql('');
+      setJqlDraft('');
+      setFilterPanelOpen(false);
       setSelectedProject(proj);
     }
   };
@@ -284,59 +400,121 @@ const App = () => {
     return 'default';
   };
 
-  // Filter Handlers
-  const handleAssigneeFilterChange = (option) => {
+  /**
+   * Generic handler for Basic filter dropdowns.
+   * Immediately updates state and triggers a debounced analytics reload.
+   */
+  const handleBasicFilterChange = (filterKey, setterFn) => (option) => {
     const val = option?.value || 'all';
-    setSelectedAssignee(val);
+    setterFn(val);
     if (selectedProject?.key) {
-      loadAnalytics(selectedProject.key, { assignee: val });
+      debouncedLoadAnalytics(selectedProject.key, { [filterKey]: val }, 300);
     }
   };
 
-  const handleIssueTypeFilterChange = (option) => {
-    const val = option?.value || 'all';
-    setSelectedIssueType(val);
+  const handleAssigneeFilterChange = handleBasicFilterChange('assignee', setSelectedAssignee);
+  const handleIssueTypeFilterChange = handleBasicFilterChange('issueType', setSelectedIssueType);
+  const handleStatusFilterChange = handleBasicFilterChange('status', setSelectedStatus);
+  const handlePriorityFilterChange = handleBasicFilterChange('priority', setSelectedPriority);
+  const handleSprintFilterChange = handleBasicFilterChange('sprint', setSelectedSprint);
+
+  /**
+   * Applies the JQL draft to the active customJql state and triggers an immediate analytics reload.
+   * This is the correct behaviour: user edits the draft, clicks Apply, THEN the query runs.
+   */
+  const handleApplyJql = () => {
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+    }
+    const trimmedJql = jqlDraft.trim();
+    setCustomJql(trimmedJql);
     if (selectedProject?.key) {
-      loadAnalytics(selectedProject.key, { issueType: val });
+      loadAnalytics(selectedProject.key, { customJql: trimmedJql });
     }
   };
 
-  const handleStatusFilterChange = (option) => {
-    const val = option?.value || 'all';
-    setSelectedStatus(val);
-    if (selectedProject?.key) {
-      loadAnalytics(selectedProject.key, { status: val });
+  /**
+   * Generates context-aware JQL autocomplete suggestions based on the last typed token.
+   */
+  const getJqlSuggestions = () => {
+    const draft = jqlDraft;
+    if (!draft || !draft.trim()) {
+      return [
+        { label: 'sprint in openSprints()', insert: 'sprint in openSprints() ' },
+        { label: 'priority = High', insert: 'priority = High ' },
+        { label: 'assignee = currentUser()', insert: 'assignee = currentUser() ' },
+        { label: 'status != Done', insert: 'status != Done ' },
+      ];
     }
+    const tokens = draft.trim().split(/\s+/);
+    const lastToken = tokens[tokens.length - 1] || '';
+    if (!lastToken) return [];
+    const search = lastToken.toLowerCase();
+
+    const matches = [];
+    (jqlAutocompleteData.visibleFieldNames || []).forEach((f) => {
+      if (
+        f.value.toLowerCase().startsWith(search) ||
+        (f.displayName && f.displayName.toLowerCase().startsWith(search))
+      ) {
+        matches.push({ label: `${f.displayName || f.value}`, insert: `${f.value} ` });
+      }
+    });
+    (jqlAutocompleteData.visibleFunctionNames || []).forEach((fn) => {
+      if (fn.value.toLowerCase().includes(search)) {
+        matches.push({ label: `${fn.value}`, insert: `${fn.value} ` });
+      }
+    });
+    (jqlAutocompleteData.jqlReservedWords || []).forEach((w) => {
+      if (w.toLowerCase().startsWith(search)) {
+        matches.push({ label: `${w}`, insert: `${w} ` });
+      }
+    });
+    return matches.slice(0, 8);
   };
 
-  const handleApplySearch = () => {
-    if (selectedProject?.key) {
-      loadAnalytics(selectedProject.key);
+  /**
+   * Replaces the currently typed partial word with the chosen autocomplete suggestion.
+   */
+  const handleInsertSuggestion = (insertText) => {
+    const trimmed = jqlDraft.trimEnd();
+    const lastSpace = trimmed.lastIndexOf(' ');
+    if (lastSpace === -1) {
+      setJqlDraft(insertText);
+    } else {
+      setJqlDraft(trimmed.substring(0, lastSpace + 1) + insertText);
     }
   };
 
   const handleClearAllFilters = () => {
-    setSearchQuery('');
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+    }
     setSelectedAssignee('all');
     setSelectedIssueType('all');
     setSelectedStatus('all');
+    setSelectedPriority('all');
+    setSelectedSprint('all');
     setCustomJql('');
+    setJqlDraft('');
     if (selectedProject?.key) {
       loadAnalytics(selectedProject.key, {
-        searchQuery: '',
         assignee: 'all',
         issueType: 'all',
         status: 'all',
+        priority: 'all',
+        sprint: 'all',
         customJql: '',
       });
     }
   };
 
   const hasActiveFilters =
-    searchQuery.trim() !== '' ||
     selectedAssignee !== 'all' ||
     selectedIssueType !== 'all' ||
     selectedStatus !== 'all' ||
+    selectedPriority !== 'all' ||
+    selectedSprint !== 'all' ||
     customJql.trim() !== '';
 
   // Table row mappings
@@ -500,86 +678,52 @@ const App = () => {
           </Inline>
         </Box>
 
-        {/* Dynamic Filter Toolbar */}
+        {/* Filter Bar: shows active lozenges + "Filters" toggle button */}
         {selectedProject && (
           <Box xcss={filterToolbarStyle}>
             <Stack space="space.100">
-              <Inline space="space.150" alignBlock="center" spread="space-between">
-                {/* Search & Select Filters */}
-                <Inline space="space.100" alignBlock="center">
-                  {/* Keyword / Summary Search */}
-                  <Box style={{ minWidth: '220px' }}>
-                    <Textfield
-                      isCompact
-                      placeholder="🔍 Search issue key, summary..."
-                      value={searchQuery}
-                      onChange={(e) => setSearchQuery(e.target.value)}
-                    />
-                  </Box>
 
-                  {/* Assignee Filter Dropdown */}
-                  <Box style={{ minWidth: '170px' }}>
-                    <Select
-                      spacing="compact"
-                      isSearchable={false}
-                      options={filterOptions.assignees}
-                      value={
-                        filterOptions.assignees.find((a) => a.value === selectedAssignee) ||
-                        filterOptions.assignees[0]
-                      }
-                      onChange={handleAssigneeFilterChange}
-                      isDisabled={loadingAnalytics}
-                    />
-                  </Box>
-
-                  {/* Issue Type Filter Dropdown */}
-                  <Box style={{ minWidth: '160px' }}>
-                    <Select
-                      spacing="compact"
-                      isSearchable={false}
-                      options={filterOptions.issueTypes}
-                      value={
-                        filterOptions.issueTypes.find((t) => t.value === selectedIssueType) ||
-                        filterOptions.issueTypes[0]
-                      }
-                      onChange={handleIssueTypeFilterChange}
-                      isDisabled={loadingAnalytics}
-                    />
-                  </Box>
-
-                  {/* Status Filter Dropdown */}
-                  <Box style={{ minWidth: '150px' }}>
-                    <Select
-                      spacing="compact"
-                      isSearchable={false}
-                      options={filterOptions.statuses}
-                      value={
-                        filterOptions.statuses.find((s) => s.value === selectedStatus) ||
-                        filterOptions.statuses[0]
-                      }
-                      onChange={handleStatusFilterChange}
-                      isDisabled={loadingAnalytics}
-                    />
-                  </Box>
-
-                  <Button
-                    appearance="default"
-                    spacing="compact"
-                    onClick={handleApplySearch}
-                    isDisabled={loadingAnalytics}
-                  >
-                    🔍 Filter
-                  </Button>
+              {/* Top row: active filter lozenges (left) + action buttons (right) */}
+              <Inline space="space.100" alignBlock="center" spread="space-between">
+                {/* Active Filter Lozenges */}
+                <Inline space="space.050" alignBlock="center">
+                  {!hasActiveFilters && !filterPanelOpen && (
+                    <Text><Em>No filters applied. All issues shown.</Em></Text>
+                  )}
+                  {selectedSprint !== 'all' && (
+                    <Lozenge appearance="inprogress">{`Sprint: ${selectedSprint}`}</Lozenge>
+                  )}
+                  {selectedAssignee !== 'all' && (
+                    <Lozenge appearance="inprogress">{`Assignee: ${selectedAssignee}`}</Lozenge>
+                  )}
+                  {selectedIssueType !== 'all' && (
+                    <Lozenge appearance="inprogress">{`Work type: ${selectedIssueType}`}</Lozenge>
+                  )}
+                  {selectedStatus !== 'all' && (
+                    <Lozenge appearance="inprogress">{`Status: ${selectedStatus}`}</Lozenge>
+                  )}
+                  {selectedPriority !== 'all' && (
+                    <Lozenge appearance="inprogress">{`Priority: ${selectedPriority}`}</Lozenge>
+                  )}
+                  {customJql.trim() !== '' && (
+                    <Lozenge appearance="moved">{`JQL: ${customJql.length > 40 ? customJql.substring(0, 40) + '…' : customJql}`}</Lozenge>
+                  )}
                 </Inline>
 
-                {/* Advanced JQL toggle & Clear button */}
+                {/* Right side buttons */}
                 <Inline space="space.100" alignBlock="center">
                   <Button
-                    appearance="subtle"
+                    appearance={filterPanelOpen ? 'primary' : 'default'}
                     spacing="compact"
-                    onClick={() => setShowAdvancedJql(!showAdvancedJql)}
+                    onClick={() => {
+                      setFilterPanelOpen(!filterPanelOpen);
+                      if (!filterPanelOpen) {
+                        setJqlDraft(customJql);
+                      }
+                    }}
+                    isDisabled={loadingAnalytics}
                   >
-                    {showAdvancedJql ? '🔼 Hide JQL' : '⚙️ Custom JQL'}
+                    {filterPanelOpen ? '▲ Hide Filters' : '⚡ Filter'}
                   </Button>
 
                   {hasActiveFilters && (
@@ -595,52 +739,379 @@ const App = () => {
                 </Inline>
               </Inline>
 
-              {/* Advanced Custom JQL Input Panel */}
-              {showAdvancedJql && (
-                <Box padding="space.100">
-                  <Inline space="space.100" alignBlock="center">
-                    <Box style={{ flexGrow: 1 }}>
-                      <Textfield
-                        isCompact
-                        isMonospaced
-                        placeholder="Enter custom JQL (e.g. priority = High AND sprint in openSprints()...)"
-                        value={customJql}
-                        onChange={(e) => setCustomJql(e.target.value)}
-                      />
-                    </Box>
-                    <Button
-                      appearance="primary"
-                      spacing="compact"
-                      onClick={handleApplySearch}
-                      isDisabled={loadingAnalytics}
-                    >
-                      Apply JQL
-                    </Button>
-                  </Inline>
+              {/* Jira Lists-Style Filter Panel */}
+              {filterPanelOpen && (
+                <Box xcss={filterPanelContainerStyle}>
+                  <Stack space="space.150">
+
+                    {/* Mode Tabs: Basic | JQL */}
+                    <Inline space="space.100" alignBlock="center">
+                      <Button
+                        appearance={filterTab === 'basic' ? 'primary' : 'subtle'}
+                        spacing="compact"
+                        onClick={() => setFilterTab('basic')}
+                      >
+                        Basic
+                      </Button>
+                      <Button
+                        appearance={filterTab === 'jql' ? 'primary' : 'subtle'}
+                        spacing="compact"
+                        onClick={() => {
+                          setFilterTab('jql');
+                          setJqlDraft(customJql);
+                        }}
+                      >
+                        JQL
+                      </Button>
+                    </Inline>
+
+                    {/* ── BASIC TAB: Two-Column Layout (Jira Lists Filter Card) ── */}
+                    {filterTab === 'basic' && (
+                      <Inline space="space.0" alignBlock="stretch">
+                        {/* Left Column: Field selection list */}
+                        <Box xcss={filterLeftColStyle}>
+                          <Stack space="space.075">
+                            <Text><Strong>Filter by Field</Strong></Text>
+
+                            {/* Sprint */}
+                            <Button
+                              appearance={activeFilterField === 'sprint' ? 'primary' : 'subtle'}
+                              spacing="compact"
+                              onClick={() => setActiveFilterField('sprint')}
+                            >
+                              {selectedSprint !== 'all' ? `Sprint: ${selectedSprint}` : 'Sprint'}
+                            </Button>
+
+                            {/* Assignee */}
+                            <Button
+                              appearance={activeFilterField === 'assignee' ? 'primary' : 'subtle'}
+                              spacing="compact"
+                              onClick={() => setActiveFilterField('assignee')}
+                            >
+                              {selectedAssignee !== 'all' ? `Assignee: ${selectedAssignee}` : 'Assignee'}
+                            </Button>
+
+                            {/* Status */}
+                            <Button
+                              appearance={activeFilterField === 'status' ? 'primary' : 'subtle'}
+                              spacing="compact"
+                              onClick={() => setActiveFilterField('status')}
+                            >
+                              {selectedStatus !== 'all' ? `Status: ${selectedStatus}` : 'Status'}
+                            </Button>
+
+                            {/* Work type */}
+                            <Button
+                              appearance={activeFilterField === 'issueType' ? 'primary' : 'subtle'}
+                              spacing="compact"
+                              onClick={() => setActiveFilterField('issueType')}
+                            >
+                              {selectedIssueType !== 'all' ? `Work type: ${selectedIssueType}` : 'Work type'}
+                            </Button>
+
+                            {/* Priority */}
+                            <Button
+                              appearance={activeFilterField === 'priority' ? 'primary' : 'subtle'}
+                              spacing="compact"
+                              onClick={() => setActiveFilterField('priority')}
+                            >
+                              {selectedPriority !== 'all' ? `Priority: ${selectedPriority}` : 'Priority'}
+                            </Button>
+
+                            {/* Extra field: Labels if added */}
+                            {activeFieldList.includes('labels') && (
+                              <Button
+                                appearance={activeFilterField === 'labels' ? 'primary' : 'subtle'}
+                                spacing="compact"
+                                onClick={() => setActiveFilterField('labels')}
+                              >
+                                Labels
+                              </Button>
+                            )}
+
+                            {/* + Add field */}
+                            {!activeFieldList.includes('labels') && (
+                              <Button
+                                appearance="subtle"
+                                spacing="compact"
+                                onClick={() => {
+                                  setActiveFieldList([...activeFieldList, 'labels']);
+                                  setActiveFilterField('labels');
+                                }}
+                              >
+                                ➕ Add field
+                              </Button>
+                            )}
+
+                            {/* Clear All at bottom of left column */}
+                            <Box paddingBlockStart="space.150">
+                              <Button
+                                appearance="subtle"
+                                spacing="compact"
+                                onClick={handleClearAllFilters}
+                                isDisabled={!hasActiveFilters || loadingAnalytics}
+                              >
+                                Clear all
+                              </Button>
+                            </Box>
+                          </Stack>
+                        </Box>
+
+                        {/* Right Column: Values for currently active field */}
+                        <Box xcss={filterRightColStyle}>
+                          <Stack space="space.150">
+                            {/* SPRINT EDITOR */}
+                            {activeFilterField === 'sprint' && (
+                              <Stack space="space.100">
+                                <Inline space="space.100" spread="space-between" alignBlock="center">
+                                  <Heading as="h4">🏃 Sprint Filter</Heading>
+                                  {selectedSprint !== 'all' && (
+                                    <Button
+                                      appearance="subtle"
+                                      spacing="compact"
+                                      onClick={() => handleSprintFilterChange({ value: 'all' })}
+                                    >
+                                      Clear field
+                                    </Button>
+                                  )}
+                                </Inline>
+                                <Text>Filter issues belonging to a specific sprint or backlog.</Text>
+                                <Box style={{ maxWidth: '320px' }}>
+                                  <Select
+                                    spacing="compact"
+                                    isSearchable={false}
+                                    options={filterOptions.sprints}
+                                    value={
+                                      filterOptions.sprints.find((s) => s.value === selectedSprint) ||
+                                      filterOptions.sprints[0]
+                                    }
+                                    onChange={handleSprintFilterChange}
+                                    isDisabled={loadingAnalytics}
+                                  />
+                                </Box>
+                              </Stack>
+                            )}
+
+                            {/* ASSIGNEE EDITOR */}
+                            {activeFilterField === 'assignee' && (
+                              <Stack space="space.100">
+                                <Inline space="space.100" spread="space-between" alignBlock="center">
+                                  <Heading as="h4">👤 Assignee Filter</Heading>
+                                  {selectedAssignee !== 'all' && (
+                                    <Button
+                                      appearance="subtle"
+                                      spacing="compact"
+                                      onClick={() => handleAssigneeFilterChange({ value: 'all' })}
+                                    >
+                                      Clear field
+                                    </Button>
+                                  )}
+                                </Inline>
+                                <Text>Filter by assigned team member or find unassigned issues.</Text>
+                                <Box style={{ maxWidth: '320px' }}>
+                                  <Select
+                                    spacing="compact"
+                                    isSearchable={true}
+                                    options={filterOptions.assignees}
+                                    value={
+                                      filterOptions.assignees.find((a) => a.value === selectedAssignee) ||
+                                      filterOptions.assignees[0]
+                                    }
+                                    onChange={handleAssigneeFilterChange}
+                                    isDisabled={loadingAnalytics}
+                                  />
+                                </Box>
+                              </Stack>
+                            )}
+
+                            {/* STATUS EDITOR */}
+                            {activeFilterField === 'status' && (
+                              <Stack space="space.100">
+                                <Inline space="space.100" spread="space-between" alignBlock="center">
+                                  <Heading as="h4">📋 Status Filter</Heading>
+                                  {selectedStatus !== 'all' && (
+                                    <Button
+                                      appearance="subtle"
+                                      spacing="compact"
+                                      onClick={() => handleStatusFilterChange({ value: 'all' })}
+                                    >
+                                      Clear field
+                                    </Button>
+                                  )}
+                                </Inline>
+                                <Text>Filter issues currently in a specific workflow status.</Text>
+                                <Box style={{ maxWidth: '320px' }}>
+                                  <Select
+                                    spacing="compact"
+                                    isSearchable={false}
+                                    options={filterOptions.statuses}
+                                    value={
+                                      filterOptions.statuses.find((s) => s.value === selectedStatus) ||
+                                      filterOptions.statuses[0]
+                                    }
+                                    onChange={handleStatusFilterChange}
+                                    isDisabled={loadingAnalytics}
+                                  />
+                                </Box>
+                              </Stack>
+                            )}
+
+                            {/* WORK TYPE EDITOR */}
+                            {activeFilterField === 'issueType' && (
+                              <Stack space="space.100">
+                                <Inline space="space.100" spread="space-between" alignBlock="center">
+                                  <Heading as="h4">🏷️ Work Type Filter</Heading>
+                                  {selectedIssueType !== 'all' && (
+                                    <Button
+                                      appearance="subtle"
+                                      spacing="compact"
+                                      onClick={() => handleIssueTypeFilterChange({ value: 'all' })}
+                                    >
+                                      Clear field
+                                    </Button>
+                                  )}
+                                </Inline>
+                                <Text>Filter by Story, Task, Bug, Epic or sub-task types.</Text>
+                                <Box style={{ maxWidth: '320px' }}>
+                                  <Select
+                                    spacing="compact"
+                                    isSearchable={false}
+                                    options={filterOptions.issueTypes}
+                                    value={
+                                      filterOptions.issueTypes.find((t) => t.value === selectedIssueType) ||
+                                      filterOptions.issueTypes[0]
+                                    }
+                                    onChange={handleIssueTypeFilterChange}
+                                    isDisabled={loadingAnalytics}
+                                  />
+                                </Box>
+                              </Stack>
+                            )}
+
+                            {/* PRIORITY EDITOR */}
+                            {activeFilterField === 'priority' && (
+                              <Stack space="space.100">
+                                <Inline space="space.100" spread="space-between" alignBlock="center">
+                                  <Heading as="h4">🚨 Priority Filter</Heading>
+                                  {selectedPriority !== 'all' && (
+                                    <Button
+                                      appearance="subtle"
+                                      spacing="compact"
+                                      onClick={() => handlePriorityFilterChange({ value: 'all' })}
+                                    >
+                                      Clear field
+                                    </Button>
+                                  )}
+                                </Inline>
+                                <Text>Filter by issue urgency (Highest, High, Medium, Low, Lowest).</Text>
+                                <Box style={{ maxWidth: '320px' }}>
+                                  <Select
+                                    spacing="compact"
+                                    isSearchable={false}
+                                    options={filterOptions.priorities}
+                                    value={
+                                      filterOptions.priorities.find((p) => p.value === selectedPriority) ||
+                                      filterOptions.priorities[0]
+                                    }
+                                    onChange={handlePriorityFilterChange}
+                                    isDisabled={loadingAnalytics}
+                                  />
+                                </Box>
+                              </Stack>
+                            )}
+
+                            {/* LABELS / ADVANCED FIELD EDITOR */}
+                            {activeFilterField === 'labels' && (
+                              <Stack space="space.100">
+                                <Heading as="h4">🏷️ Labels / Tags</Heading>
+                                <Text>To filter by label or tag, use the JQL tab with: <Strong>labels = "your-label"</Strong></Text>
+                                <Button
+                                  appearance="primary"
+                                  spacing="compact"
+                                  onClick={() => {
+                                    setFilterTab('jql');
+                                    setJqlDraft(customJql ? `${customJql} AND labels = ""` : 'labels = ""');
+                                  }}
+                                >
+                                  Open in JQL
+                                </Button>
+                              </Stack>
+                            )}
+                          </Stack>
+                        </Box>
+                      </Inline>
+                    )}
+
+                    {/* ── JQL TAB with Live Autocomplete ── */}
+                    {filterTab === 'jql' && (
+                      <Stack space="space.100">
+                        <Text>
+                          Type any JQL query. Use the interactive autocomplete suggestions below to quickly build queries. Changes apply when clicking <Strong>Apply</Strong>.
+                        </Text>
+
+                        {/* JQL Input */}
+                        <Textfield
+                          isCompact
+                          isMonospaced
+                          placeholder="e.g. priority = High AND sprint in openSprints() AND status != Done"
+                          value={jqlDraft}
+                          onChange={(e) => setJqlDraft(e.target.value)}
+                        />
+
+                        {/* Interactive Autocomplete Suggestions */}
+                        <Stack space="space.050">
+                          <Text><Strong>Suggestions (click to insert):</Strong></Text>
+                          <Inline space="space.050" alignBlock="center">
+                            {getJqlSuggestions().map((sug, idx) => (
+                              <Button
+                                key={`sug-${idx}`}
+                                appearance="subtle"
+                                spacing="compact"
+                                onClick={() => handleInsertSuggestion(sug.insert)}
+                              >
+                                {sug.label}
+                              </Button>
+                            ))}
+                          </Inline>
+                        </Stack>
+
+                        {/* Apply & Reset Buttons */}
+                        <Inline space="space.100" alignBlock="center">
+                          <Button
+                            appearance="primary"
+                            spacing="compact"
+                            onClick={handleApplyJql}
+                            isDisabled={loadingAnalytics}
+                          >
+                            Apply
+                          </Button>
+                          {customJql.trim() !== '' && (
+                            <Button
+                              appearance="subtle"
+                              spacing="compact"
+                              onClick={() => {
+                                setJqlDraft('');
+                                setCustomJql('');
+                                if (selectedProject?.key) {
+                                  loadAnalytics(selectedProject.key, { customJql: '' });
+                                }
+                              }}
+                              isDisabled={loadingAnalytics}
+                            >
+                              Clear JQL
+                            </Button>
+                          )}
+                          {customJql.trim() !== '' && (
+                            <Lozenge appearance="moved">{`Applied: ${customJql}`}</Lozenge>
+                          )}
+                        </Inline>
+                      </Stack>
+                    )}
+
+                  </Stack>
                 </Box>
               )}
 
-              {/* Active Filter Indicators */}
-              {hasActiveFilters && (
-                <Inline space="space.050" alignBlock="center">
-                  <Text><Strong>Active Filters:</Strong></Text>
-                  {searchQuery.trim() !== '' && (
-                    <Lozenge appearance="inprogress">{`Search: "${searchQuery}"`}</Lozenge>
-                  )}
-                  {selectedAssignee !== 'all' && (
-                    <Lozenge appearance="inprogress">{`Assignee: ${selectedAssignee}`}</Lozenge>
-                  )}
-                  {selectedIssueType !== 'all' && (
-                    <Lozenge appearance="inprogress">{`Type: ${selectedIssueType}`}</Lozenge>
-                  )}
-                  {selectedStatus !== 'all' && (
-                    <Lozenge appearance="inprogress">{`Status: ${selectedStatus}`}</Lozenge>
-                  )}
-                  {customJql.trim() !== '' && (
-                    <Lozenge appearance="inprogress">{`JQL: ${customJql}`}</Lozenge>
-                  )}
-                </Inline>
-              )}
             </Stack>
           </Box>
         )}
@@ -659,6 +1130,16 @@ const App = () => {
         {error && (
           <SectionMessage appearance="error" title="Notice">
             <Text>{error}</Text>
+          </SectionMessage>
+        )}
+
+        {/* Large Project Pagination Notice */}
+        {!loadingProjects && analytics?.isTruncated && (
+          <SectionMessage appearance="warning" title="Large Project Notice">
+            <Text>
+              Displaying analytics calculated from the most recent 1,000 issues (out of {analytics.totalFound} total).
+              To inspect specific subsets, refine using Sprint, Assignee, or Custom JQL filters above.
+            </Text>
           </SectionMessage>
         )}
 
