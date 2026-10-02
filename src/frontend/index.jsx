@@ -1189,7 +1189,7 @@ const App = () => {
                       appearance={
                         kpis.completionRate === 100 ? 'success'
                           : kpis.completionRate > 0 ? 'inprogress'
-                          : 'default'
+                            : 'default'
                       }
                     >
                       {kpis.completionRate === 100 ? 'Done' : 'Active'}
