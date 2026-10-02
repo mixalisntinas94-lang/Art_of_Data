@@ -6,6 +6,7 @@ modules:
         function: resolver-function
       render: native
       title: Agile Pulse Analytics
+      layout: basic
   jira:projectPage:
     - key: agile-pulse-project-page
       resource: main
@@ -13,6 +14,7 @@ modules:
         function: resolver-function
       render: native
       title: Agile Insights
+      layout: basic
   function:
     - key: resolver-function
       handler: resolvers/index.handler

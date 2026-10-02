@@ -26,7 +26,8 @@ import ForgeReconciler, {
   TagGroup,
   useProductContext,
   xcss,
-  PieChart,
+  BarChart,
+  HorizontalBarChart,
 } from '@forge/react';
 import { invoke } from '@forge/bridge';
 
@@ -43,7 +44,7 @@ const kpiCardStyle = xcss({
   padding: 'space.200',
   boxShadow: 'elevation.shadow.raised',
   flexGrow: 1,
-  minWidth: '220px',
+  width: '19%',
 });
 
 const sectionCardStyle = xcss({
@@ -55,6 +56,35 @@ const sectionCardStyle = xcss({
   padding: 'space.250',
   boxShadow: 'elevation.shadow.raised',
 });
+
+const fullWidthBoxStyle = xcss({
+  width: '100%',
+});
+
+const chartCardHalfStyle = xcss({
+  backgroundColor: 'elevation.surface.raised',
+  borderColor: 'color.border',
+  borderWidth: 'border.width',
+  borderStyle: 'solid',
+  borderRadius: 'radius.large',
+  padding: 'space.250',
+  boxShadow: 'elevation.shadow.raised',
+  flexGrow: 1,
+  width: '49%',
+});
+
+const chartCardWideStyle = xcss({
+  backgroundColor: 'elevation.surface.raised',
+  borderColor: 'color.border',
+  borderWidth: 'border.width',
+  borderStyle: 'solid',
+  borderRadius: 'radius.large',
+  padding: 'space.250',
+  boxShadow: 'elevation.shadow.raised',
+  flexGrow: 1,
+  width: '100%',
+});
+
 
 const headerContainerStyle = xcss({
   backgroundColor: 'elevation.surface.raised',
@@ -615,15 +645,13 @@ const App = () => {
 
   const kpis = analytics?.kpis;
 
-  const statusPieData = [
-    { label: 'To Do', value: kpis?.toDoCount || 0 },
-    { label: 'In Progress', value: kpis?.inProgressCount || 0 },
-    { label: 'Done', value: kpis?.completedCount || 0 },
-  ].filter((item) => item.value > 0);
+  // statusPieData was used for the old PieChart; kept as unused variable in case needed later.
+  // The new dashboard uses LineChart and StackBarChart instead.
+  // const statusPieData = [...]
 
   return (
-    <Box padding="space.200">
-      <Stack space="space.200">
+    <Box padding="space.200" xcss={fullWidthBoxStyle}>
+      <Stack space="space.200" alignInline="stretch" grow="fill">
         {/* Modern Header Bar */}
         <Box xcss={headerContainerStyle}>
           <Inline space="space.200" spread="space-between" alignBlock="center">
@@ -1145,150 +1173,128 @@ const App = () => {
 
         {/* Main Analytics Content */}
         {!loadingProjects && analytics && (
-          <Stack space="space.250">
-            {/* Elevated Hero KPI Scorecards Grid */}
-            <Inline space="space.150" spread="space-between">
-              {/* Card 1: Sprint Completion */}
+          <Stack space="space.250" alignInline="stretch" grow="fill">
+            {/* ═══════════════════════════════════════════════════════
+             *  ROW 1 — FIVE KPI HERO CARDS
+             *  Shows the key pulse metrics at a glance.
+             * ═══════════════════════════════════════════════════════ */}
+            <Inline space="space.150" spread="space-between" alignBlock="stretch">
+
+              {/* Card 1: Sprint Completion Rate */}
               <Box xcss={kpiCardStyle}>
                 <Stack space="space.100">
                   <Inline spread="space-between" alignBlock="center">
-                    <Text>
-                      <Strong>🎯 Sprint Completion</Strong>
-                    </Text>
+                    <Text><Strong>🎯 Completion Rate</Strong></Text>
                     <Lozenge
                       appearance={
-                        kpis.completionRate === 100
-                          ? 'success'
-                          : kpis.completionRate > 0
-                          ? 'inprogress'
+                        kpis.completionRate === 100 ? 'success'
+                          : kpis.completionRate > 0 ? 'inprogress'
                           : 'default'
                       }
                     >
-                      {kpis.completionRate === 100 ? 'Completed' : 'In Progress'}
+                      {kpis.completionRate === 100 ? 'Done' : 'Active'}
                     </Lozenge>
                   </Inline>
-
                   <Heading as="h1">{`${kpis.completionRate}%`}</Heading>
-
                   <ProgressBar
                     value={kpis.completionRate / 100}
-                    appearance={kpis.completionRate >= 50 ? 'success' : 'inprogress'}
+                    appearance="success"
                   />
-
                   <Text>
-                    <Strong>{kpis.completedCount}</Strong> of <Strong>{kpis.totalIssues}</Strong> issues resolved
+                    <Strong>{kpis.completedCount}</Strong>{' of '}<Strong>{kpis.totalIssues}</Strong>{' issues done'}
                   </Text>
                 </Stack>
               </Box>
 
-              {/* Card 2: Velocity & Effort */}
+              {/* Card 2: Sprint Velocity (Story Points Done) */}
               <Box xcss={kpiCardStyle}>
                 <Stack space="space.100">
                   <Inline spread="space-between" alignBlock="center">
-                    <Text>
-                      <Strong>
-                        {metricMode === 'points' ? '⚡ Story Points' : '⏱️ Total Effort'}
-                      </Strong>
-                    </Text>
-                    <Badge appearance="primary">
-                      {metricMode === 'points' ? 'Velocity' : 'Worklog'}
-                    </Badge>
+                    <Text><Strong>⚡ Sprint Velocity</Strong></Text>
+                    <Badge appearance="primary">SP Done</Badge>
                   </Inline>
-
-                  <Heading as="h1">
-                    {metricMode === 'points'
-                      ? `${kpis.totalStoryPoints} SP`
-                      : `${kpis.totalEstimatedHours}h`}
-                  </Heading>
-
+                  <Heading as="h1">{`${kpis.completedStoryPoints} SP`}</Heading>
                   <Inline space="space.100" alignBlock="center">
-                    {metricMode === 'points' ? (
-                      <>
-                        <Lozenge appearance="success">{`${kpis.completedStoryPoints} SP Done`}</Lozenge>
-                        <Lozenge appearance="inprogress">{`${kpis.remainingStoryPoints} SP Left`}</Lozenge>
-                      </>
-                    ) : (
-                      <>
-                        <Lozenge appearance="success">{`${kpis.totalLoggedHours}h Logged`}</Lozenge>
-                        <Lozenge appearance="inprogress">{`${kpis.totalRemainingHours}h Left`}</Lozenge>
-                      </>
-                    )}
+                    <Lozenge appearance="default">{`${kpis.totalStoryPoints} SP Total`}</Lozenge>
+                    <Lozenge appearance="inprogress">{`${kpis.remainingStoryPoints} SP Left`}</Lozenge>
                   </Inline>
-
                   <Text>
-                    {kpis.avgCycleTimeDays !== null
-                      ? `⚡ Cycle Time: ${kpis.avgCycleTimeDays} days avg`
-                      : 'Cycle time tracking active'}
+                    {metricMode === 'hours'
+                      ? `${kpis.totalLoggedHours}h logged / ${kpis.totalEstimatedHours}h est.`
+                      : `Completion: ${kpis.completedStoryPoints} of ${kpis.totalStoryPoints} SP`}
                   </Text>
                 </Stack>
               </Box>
 
-              {/* Card 3: Team Health & Capacity */}
+              {/* Card 3: Bug Ratio */}
               <Box xcss={kpiCardStyle}>
                 <Stack space="space.100">
                   <Inline spread="space-between" alignBlock="center">
-                    <Text>
-                      <Strong>👥 Active Team</Strong>
-                    </Text>
-                    <Badge appearance="default">{`${analytics.teamMembers.length} Members`}</Badge>
+                    <Text><Strong>🐛 Bug Ratio</Strong></Text>
+                    <Lozenge appearance={kpis.bugRatio > 25 ? 'removed' : kpis.bugRatio > 10 ? 'moved' : 'success'}>
+                      {kpis.bugRatio > 25 ? 'High' : kpis.bugRatio > 10 ? 'Watch' : 'Healthy'}
+                    </Lozenge>
                   </Inline>
-
-                  <Heading as="h1">
-                    {`${analytics.teamMembers.filter((m) => m.name !== 'Unassigned').length} Active`}
-                  </Heading>
-
-                  <Inline space="space.100" alignBlock="center">
-                    {kpis.unassignedCount > 0 ? (
-                      <Lozenge appearance="removed">{`${kpis.unassignedCount} Unassigned`}</Lozenge>
-                    ) : (
-                      <Lozenge appearance="success">All Assigned</Lozenge>
-                    )}
-                  </Inline>
-
-                  <Text>
-                    {metricMode === 'points' ? (
-                      kpis.unestimatedPointsCount > 0
-                        ? `⚠️ ${kpis.unestimatedPointsCount} tickets missing SP`
-                        : '✅ All tickets estimated'
-                    ) : (
-                      kpis.unestimatedHoursCount > 0
-                        ? `⚠️ ${kpis.unestimatedHoursCount} tickets missing hours`
-                        : '✅ All tickets estimated'
-                    )}
-                  </Text>
-                </Stack>
-              </Box>
-
-              {/* Card 4: Risks & Quality */}
-              <Box xcss={kpiCardStyle}>
-                <Stack space="space.100">
-                  <Inline spread="space-between" alignBlock="center">
-                    <Text>
-                      <Strong>🚦 Risk & Quality</Strong>
-                    </Text>
-                    {kpis.staleCount > 0 ? (
-                      <Badge appearance="removed">{`${kpis.staleCount} Stale`}</Badge>
-                    ) : (
-                      <Badge appearance="added">0 Stale</Badge>
-                    )}
-                  </Inline>
-
                   <Heading as="h1">{`${kpis.bugRatio}%`}</Heading>
-
                   <Inline space="space.100" alignBlock="center">
                     <Lozenge appearance={kpis.bugCount > 0 ? 'removed' : 'success'}>
-                      {`${kpis.bugCount} bugs detected`}
+                      {`${kpis.bugCount} bug${kpis.bugCount !== 1 ? 's' : ''}`}
                     </Lozenge>
                     <Lozenge appearance={kpis.staleCount > 0 ? 'moved' : 'default'}>
-                      {kpis.staleCount > 0 ? 'Action Needed' : 'Smooth Flow'}
+                      {kpis.staleCount > 0 ? `${kpis.staleCount} stale` : 'No stale'}
                     </Lozenge>
                   </Inline>
+                  <Text>
+                    {kpis.bugRatio > 30
+                      ? '⚠️ Elevated — review quality allocation'
+                      : '✅ Within acceptable range'}
+                  </Text>
+                </Stack>
+              </Box>
 
+              {/* Card 4: Story Points Done vs Planned */}
+              <Box xcss={kpiCardStyle}>
+                <Stack space="space.100">
+                  <Inline spread="space-between" alignBlock="center">
+                    <Text><Strong>📦 SP Done / Planned</Strong></Text>
+                    <Badge appearance={kpis.completedStoryPoints >= kpis.totalStoryPoints * 0.8 ? 'added' : 'default'}>
+                      {kpis.completedStoryPoints >= kpis.totalStoryPoints * 0.8 ? 'On Track' : 'Behind'}
+                    </Badge>
+                  </Inline>
+                  <Heading as="h1">
+                    {`${kpis.completedStoryPoints} / ${kpis.totalStoryPoints}`}
+                  </Heading>
+                  <ProgressBar
+                    value={kpis.totalStoryPoints > 0 ? kpis.completedStoryPoints / kpis.totalStoryPoints : 0}
+                    appearance="success"
+                  />
+                  <Text>
+                    {kpis.unestimatedPointsCount > 0
+                      ? `⚠️ ${kpis.unestimatedPointsCount} unestimated issues`
+                      : '✅ All issues estimated'}
+                  </Text>
+                </Stack>
+              </Box>
+
+              {/* Card 5: Average Cycle Time */}
+              <Box xcss={kpiCardStyle}>
+                <Stack space="space.100">
+                  <Inline spread="space-between" alignBlock="center">
+                    <Text><Strong>⏱️ Avg Cycle Time</Strong></Text>
+                    <Badge appearance="default">Days</Badge>
+                  </Inline>
+                  <Heading as="h1">
+                    {kpis.avgCycleTimeDays !== null && kpis.avgCycleTimeDays > 0 ? `${kpis.avgCycleTimeDays}d` : 'N/A'}
+                  </Heading>
+                  <Inline space="space.100" alignBlock="center">
+                    <Lozenge appearance="default">{`${analytics.teamMembers.filter((m) => m.name !== 'Unassigned').length} active members`}</Lozenge>
+                  </Inline>
                   <Text>
                     <Em>{lastRefreshed ? `Synced at ${lastRefreshed}` : 'Real-time sync'}</Em>
                   </Text>
                 </Stack>
               </Box>
+
             </Inline>
 
             {/* Navigation Tabs */}
@@ -1304,30 +1310,45 @@ const App = () => {
                 <Tab>📑 Executive Standup</Tab>
               </TabList>
 
-              {/* TAB 1: Overview & Distribution */}
+              {/* ═══════════════════════════════════════════════════════
+               *  TAB 1: Overview & Breakdown — NEW 3-ROW DASHBOARD
+               * ═══════════════════════════════════════════════════════ */}
               <TabPanel>
-                <Box padding="space.100">
-                  <Stack space="space.200">
-                    <Inline space="space.200" spread="space-between">
-                      {/* Status Breakdown with Visual Chart */}
-                      <Box xcss={sectionCardStyle} style={{ flex: '1 1 0' }}>
+                <Box padding="space.100" xcss={fullWidthBoxStyle}>
+                  <Stack space="space.250" alignInline="stretch" grow="fill">
+                    {/* ════════════════════════════════════════════════════
+                     *  ROW 2: Status Breakdown + Issue Type Breakdown
+                     *  50/50 split using explicit xcss width: '49%'
+                     * ════════════════════════════════════════════════════ */}
+                    <Inline space="space.200" spread="space-between" alignBlock="stretch">
+
+                      {/* LEFT: Status Breakdown — BarChart */}
+                      <Box xcss={chartCardHalfStyle}>
                         <Stack space="space.150">
                           <Inline spread="space-between" alignBlock="center">
-                            <Heading as="h3">📊 Status Distribution</Heading>
-                            <Badge appearance="primary">{`${kpis.totalIssues} Total Tickets`}</Badge>
+                            <Heading as="h3">📊 Status Breakdown</Heading>
+                            <Lozenge appearance={kpis.completionRate >= 50 ? 'success' : 'inprogress'}>
+                              {kpis.completionRate >= 50 ? 'On Track' : 'Below Target'}
+                            </Lozenge>
                           </Inline>
+                          <Text>
+                            Issue counts per status category — discrete categories, not a time series.
+                          </Text>
 
-                          {statusPieData.length > 0 ? (
-                            <PieChart
-                              data={statusPieData}
-                              valueAccessor="value"
-                              labelAccessor="label"
-                              colorAccessor="label"
-                              height={220}
+                          {kpis.totalIssues > 0 ? (
+                            <BarChart
+                              data={[
+                                { status: 'To Do', count: kpis.toDoCount },
+                                { status: 'In Progress', count: kpis.inProgressCount },
+                                { status: 'Done', count: kpis.completedCount },
+                              ]}
+                              xAccessor="status"
+                              yAccessor="count"
+                              height={280}
                               showBorder={false}
                             />
                           ) : (
-                            <EmptyState header="No tickets" description="No tickets match the current filter." />
+                            <EmptyState header="No data" description="No issues match the current filter." />
                           )}
 
                           <Inline space="space.100">
@@ -1338,39 +1359,39 @@ const App = () => {
                         </Stack>
                       </Box>
 
-                      {/* Issue Types & Bug Ratio */}
-                      <Box xcss={sectionCardStyle} style={{ flex: '1 1 0' }}>
+                      {/* RIGHT: Issue Type Breakdown — BarChart */}
+                      <Box xcss={chartCardHalfStyle}>
                         <Stack space="space.150">
                           <Inline spread="space-between" alignBlock="center">
-                            <Heading as="h3">🐛 Quality & Types</Heading>
+                            <Heading as="h3">🐛 Issue Type Breakdown</Heading>
                             <Lozenge appearance={kpis.bugRatio > 25 ? 'removed' : 'success'}>
                               {`Bug Ratio: ${kpis.bugRatio}%`}
                             </Lozenge>
                           </Inline>
-
-                          <Inline space="space.100">
-                            {(analytics.charts?.types || []).map((t, idx) => (
-                              <Badge key={`type-${idx}`} appearance="primary">
-                                {`${t.name}: ${t.value}`}
-                              </Badge>
-                            ))}
-                          </Inline>
-
                           <Text>
-                            {kpis.bugRatio > 30
-                              ? '⚠️ Bug ratio is elevated. Consider allocating more sprint capacity to quality and tech debt.'
-                              : '✅ Healthy balance between feature development and bug fixes.'}
+                            Distribution of issue types in the current filter scope.
                           </Text>
 
-                          {/* Priority Breakdown Pills */}
+                          {(analytics.charts?.types || []).length > 0 ? (
+                            <BarChart
+                              data={(analytics.charts?.types || []).map((t) => ({
+                                type: t.name,
+                                count: t.value,
+                              }))}
+                              xAccessor="type"
+                              yAccessor="count"
+                              height={280}
+                              showBorder={false}
+                            />
+                          ) : (
+                            <EmptyState header="No data" description="No issue type data available." />
+                          )}
+
                           <Stack space="space.050">
                             <Text><Strong>🎯 Priority Levels:</Strong></Text>
-                            <Inline space="space.100">
+                            <Inline space="space.075">
                               {(analytics.charts?.priorities || []).map((p, idx) => (
-                                <Lozenge
-                                  key={`prio-${idx}`}
-                                  appearance={getPriorityAppearance(p.name)}
-                                >
+                                <Lozenge key={`prio-${idx}`} appearance={getPriorityAppearance(p.name)}>
                                   {`${p.name}: ${p.value}`}
                                 </Lozenge>
                               ))}
@@ -1378,7 +1399,125 @@ const App = () => {
                           </Stack>
                         </Stack>
                       </Box>
+
                     </Inline>
+
+                    {/* ════════════════════════════════════════════════════
+                     *  ROW 3: Team Distribution (50%) + Status Funnel (50%)
+                     *  (Using 50/50 split to match the mockup 2x2 grid exactly)
+                     * ════════════════════════════════════════════════════ */}
+                    <Inline space="space.200" spread="space-between" alignBlock="stretch">
+
+                      {/* LEFT (50%): Team Member Distribution */}
+                      <Box xcss={chartCardHalfStyle}>
+                        <Stack space="space.150">
+                          <Inline spread="space-between" alignBlock="center">
+                            <Heading as="h3">👥 Team Member Distribution</Heading>
+                            <Badge appearance="default">
+                              {`${analytics.teamMembers.filter((m) => m.name !== 'Unassigned').length} Members`}
+                            </Badge>
+                          </Inline>
+                          <Text>
+                            {metricMode === 'points'
+                              ? 'SP per member — falls back to issue count if unestimated.'
+                              : 'Hours per member — falls back to issue count if untracked.'}
+                          </Text>
+
+                          {analytics.teamMembers.filter((m) => m.name !== 'Unassigned').length > 0 ? (
+                            <HorizontalBarChart
+                              data={analytics.teamMembers
+                                .filter((m) => m.name !== 'Unassigned')
+                                .slice(0, 10)
+                                .map((m) => {
+                                  const primaryValue = metricMode === 'points'
+                                    ? m.completedPoints
+                                    : m.loggedHours;
+                                  const displayValue = primaryValue > 0
+                                    ? primaryValue
+                                    : m.completedIssues > 0
+                                      ? m.completedIssues
+                                      : m.totalIssues;
+                                  return { name: m.name, value: displayValue };
+                                })}
+                              xAccessor="value"
+                              yAccessor="name"
+                              height={Math.max(
+                                260,
+                                analytics.teamMembers.filter((m) => m.name !== 'Unassigned').length * 48
+                              )}
+                              showBorder={false}
+                            />
+                          ) : (
+                            <EmptyState
+                              header="No team data"
+                              description="No assigned members in this filter scope."
+                            />
+                          )}
+
+                          <Text>
+                            <Em>
+                              {metricMode === 'points'
+                                ? 'SP completed per member (falls back to issue count if unestimated)'
+                                : 'Hours logged per member (falls back to issue count if untracked)'}
+                            </Em>
+                          </Text>
+                        </Stack>
+                      </Box>
+
+                      {/* RIGHT (50%): Status Funnel */}
+                      <Box xcss={chartCardHalfStyle}>
+                        <Stack space="space.150">
+                          <Inline spread="space-between" alignBlock="center">
+                            <Heading as="h3">🔽 Status Funnel</Heading>
+                            <Lozenge appearance={kpis.inProgressCount > kpis.completedCount ? 'moved' : 'success'}>
+                              {kpis.inProgressCount > kpis.completedCount ? 'Bottleneck Risk' : 'Flowing'}
+                            </Lozenge>
+                          </Inline>
+                          <Text>
+                            Issue flow through workflow stages. Large In Progress vs Done gap = bottleneck.
+                          </Text>
+
+                          {kpis.totalIssues > 0 ? (
+                            <BarChart
+                              data={[
+                                { stage: 'To Do', issues: kpis.toDoCount },
+                                { stage: 'In Progress', issues: kpis.inProgressCount },
+                                { stage: 'Done', issues: kpis.completedCount },
+                              ]}
+                              xAccessor="stage"
+                              yAccessor="issues"
+                              height={280}
+                              showBorder={false}
+                            />
+                          ) : (
+                            <EmptyState header="No data" description="No issues to display." />
+                          )}
+
+                          <Stack space="space.075">
+                            <Inline space="space.100" spread="space-between">
+                              <Text>To Do</Text>
+                              <Badge appearance="default">{kpis.toDoCount}</Badge>
+                            </Inline>
+                            <Inline space="space.100" spread="space-between">
+                              <Text>In Progress</Text>
+                              <Badge appearance="primary">{kpis.inProgressCount}</Badge>
+                            </Inline>
+                            <Inline space="space.100" spread="space-between">
+                              <Text>Done</Text>
+                              <Badge appearance="added">{kpis.completedCount}</Badge>
+                            </Inline>
+                            {kpis.staleCount > 0 && (
+                              <Inline space="space.100" spread="space-between">
+                                <Text>⚠️ Stale (&ge;4 days)</Text>
+                                <Badge appearance="removed">{kpis.staleCount}</Badge>
+                              </Inline>
+                            )}
+                          </Stack>
+                        </Stack>
+                      </Box>
+
+                    </Inline>
+
                   </Stack>
                 </Box>
               </TabPanel>

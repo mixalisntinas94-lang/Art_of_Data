@@ -50,3 +50,7 @@ Thumbs.db
 
 
 /.forge/
+
+# Credentials — ΠΟΤΕ μην κάνεις commit τα credentials σου!
+.env
+scripts/seed-jira/.env
