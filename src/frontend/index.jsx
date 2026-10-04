@@ -165,6 +165,21 @@ const App = () => {
   const [activeFieldList, setActiveFieldList] = useState(['sprint', 'assignee', 'status', 'issueType', 'priority']);
   const [showAddFieldSelect, setShowAddFieldSelect] = useState(false);
 
+  // Dynamic Explorer State
+  const [explorerDimension, setExplorerDimension] = useState('status'); 
+  const [explorerMeasure, setExplorerMeasure] = useState('count');
+  const [explorerFilterDim, setExplorerFilterDim] = useState('none');
+  const [explorerFilterVal, setExplorerFilterVal] = useState('all');
+
+  // Custom Analytics Engine State (Power BI style)
+  const [customWidgets, setCustomWidgets] = useState([]);
+  const [widgetForm, setWidgetForm] = useState({
+    title: 'Custom Insight',
+    type: 'bar',
+    dimension: 'status',
+    measure: 'count'
+  });
+
   // JQL Autocomplete dictionary from Jira
   const [jqlAutocompleteData, setJqlAutocompleteData] = useState({
     visibleFieldNames: [],
@@ -647,7 +662,92 @@ const App = () => {
 
   // statusPieData was used for the old PieChart; kept as unused variable in case needed later.
   // The new dashboard uses LineChart and StackBarChart instead.
-  // const statusPieData = [...]
+  // ==========================================
+  // DYNAMIC EXPLORER LOGIC
+  // ==========================================
+  const getExplorerData = () => {
+    if (!analytics?.rawIssues) return { chartData: [], tableRows: [], filteredIssues: [] };
+
+    let filteredIssues = analytics.rawIssues;
+    if (explorerFilterDim !== 'none' && explorerFilterVal !== 'all') {
+      filteredIssues = filteredIssues.filter(issue => issue[explorerFilterDim] === explorerFilterVal);
+    }
+
+    const grouped = {};
+    filteredIssues.forEach(issue => {
+      const dimValue = issue[explorerDimension] || 'None/Unassigned';
+      if (!grouped[dimValue]) grouped[dimValue] = 0;
+      
+      if (explorerMeasure === 'count') {
+        grouped[dimValue] += 1;
+      } else {
+        grouped[dimValue] += (issue[explorerMeasure] || 0);
+      }
+    });
+
+    const chartData = Object.keys(grouped).map(key => ({
+      name: key,
+      value: Math.round(grouped[key] * 10) / 10
+    })).sort((a, b) => b.value - a.value);
+
+    const chartDataClean = chartData.filter(d => d.value > 0);
+
+    const tableRows = filteredIssues.map(issue => {
+      return {
+        key: `dyn-${issue.id}`,
+        cells: [
+          { key: 'key', content: <Text>{issue.key}</Text> },
+          { key: 'summary', content: <Text>{issue.summary}</Text> },
+          { key: 'status', content: <Lozenge appearance={getStatusAppearance(issue.statusCategory)}>{issue.status}</Lozenge> },
+          { key: 'assignee', content: <Text>{issue.assignee}</Text> },
+          { key: 'priority', content: <Lozenge appearance={getPriorityAppearance(issue.priority)}>{issue.priority}</Lozenge> },
+          { key: 'type', content: <Text>{issue.type}</Text> },
+          { key: 'measure', content: <Text>{explorerMeasure === 'count' ? '-' : issue[explorerMeasure]}</Text> }
+        ]
+      };
+    });
+
+    return { chartData: chartDataClean, tableRows, filteredIssues };
+  };
+
+  const { chartData: expChart, tableRows: expTableRows, filteredIssues: expFiltered } = getExplorerData();
+
+  const getExplorerFilterOptions = () => {
+    if (!analytics?.rawIssues || explorerFilterDim === 'none') return [{label: 'All', value: 'all'}];
+    const uniqueVals = [...new Set(analytics.rawIssues.map(i => i[explorerFilterDim]))].filter(Boolean);
+    return [{label: 'All', value: 'all'}, ...uniqueVals.map(v => ({label: v, value: v}))];
+  };
+  const expFilterOptions = getExplorerFilterOptions();
+
+  // ==========================================
+  // CUSTOM ANALYTICS ENGINE LOGIC
+  // ==========================================
+  const getWidgetData = (widget) => {
+    if (!analytics?.rawIssues) return [];
+    const grouped = {};
+    analytics.rawIssues.forEach(issue => {
+      const dimValue = issue[widget.dimension] || 'Unassigned';
+      if (!grouped[dimValue]) grouped[dimValue] = 0;
+      if (widget.measure === 'count') {
+        grouped[dimValue] += 1;
+      } else {
+        grouped[dimValue] += (issue[widget.measure] || 0);
+      }
+    });
+    return Object.keys(grouped).map(key => ({
+      name: key,
+      value: Math.round(grouped[key] * 10) / 10
+    })).filter(d => d.value > 0).sort((a, b) => b.value - a.value);
+  };
+
+  const addWidget = () => {
+    setCustomWidgets([...customWidgets, { ...widgetForm, id: Date.now() }]);
+    setWidgetForm({ ...widgetForm, title: `Insight ${customWidgets.length + 2}` }); // Reset title for next
+  };
+
+  const removeWidget = (id) => {
+    setCustomWidgets(customWidgets.filter(w => w.id !== id));
+  };
 
   return (
     <Box padding="space.200" xcss={fullWidthBoxStyle}>
@@ -1308,6 +1408,8 @@ const App = () => {
                 </Tab>
                 <Tab>📋 Issue Explorer</Tab>
                 <Tab>📑 Executive Standup</Tab>
+                <Tab>🔎 Dynamic Dashboard</Tab>
+                <Tab>🪄 Custom Analytics Engine</Tab>
               </TabList>
 
               {/* ═══════════════════════════════════════════════════════
@@ -1689,6 +1791,242 @@ const App = () => {
                       />
                     </Stack>
                   </Box>
+                </Box>
+              </TabPanel>
+
+              {/* ═══════════════════════════════════════════════════════
+               *  TAB 6: Dynamic Data Explorer
+               * ═══════════════════════════════════════════════════════ */}
+              <TabPanel>
+                <Box padding="space.100" xcss={fullWidthBoxStyle}>
+                  <Stack space="space.250">
+                    
+                    {/* Control Bar */}
+                    <Box xcss={sectionCardStyle}>
+                      <Stack space="space.150">
+                        <Heading as="h3">🎛️ Data Controls</Heading>
+                        <Inline space="space.200" alignBlock="center">
+                          
+                          <Stack space="space.050">
+                            <Text><Strong>Group By (Dimension)</Strong></Text>
+                            <Select
+                              options={[
+                                { label: 'Status', value: 'status' },
+                                { label: 'Assignee', value: 'assignee' },
+                                { label: 'Issue Type', value: 'type' },
+                                { label: 'Priority', value: 'priority' }
+                              ]}
+                              onChange={(option) => setExplorerDimension(option.value)}
+                              value={{ label: explorerDimension.charAt(0).toUpperCase() + explorerDimension.slice(1), value: explorerDimension }}
+                            />
+                          </Stack>
+
+                          <Stack space="space.050">
+                            <Text><Strong>Measure (Metric)</Strong></Text>
+                            <Select
+                              options={[
+                                { label: 'Issue Count', value: 'count' },
+                                { label: 'Story Points', value: 'storyPoints' },
+                                { label: 'Estimated Hours', value: 'estimatedHours' },
+                                { label: 'Logged Hours', value: 'loggedHours' }
+                              ]}
+                              onChange={(option) => setExplorerMeasure(option.value)}
+                              value={{ label: explorerMeasure === 'count' ? 'Issue Count' : explorerMeasure === 'storyPoints' ? 'Story Points' : explorerMeasure === 'estimatedHours' ? 'Estimated Hours' : 'Logged Hours', value: explorerMeasure }}
+                            />
+                          </Stack>
+
+                          <Stack space="space.050">
+                            <Text><Strong>Filter By</Strong></Text>
+                            <Select
+                              options={[
+                                { label: 'None', value: 'none' },
+                                { label: 'Status', value: 'status' },
+                                { label: 'Assignee', value: 'assignee' },
+                                { label: 'Issue Type', value: 'type' },
+                                { label: 'Priority', value: 'priority' }
+                              ]}
+                              onChange={(option) => {
+                                setExplorerFilterDim(option.value);
+                                setExplorerFilterVal('all');
+                              }}
+                              value={{ label: explorerFilterDim === 'none' ? 'None' : explorerFilterDim.charAt(0).toUpperCase() + explorerFilterDim.slice(1), value: explorerFilterDim }}
+                            />
+                          </Stack>
+
+                          {explorerFilterDim !== 'none' && (
+                            <Stack space="space.050">
+                              <Text><Strong>Filter Value</Strong></Text>
+                              <Select
+                                options={expFilterOptions}
+                                onChange={(option) => setExplorerFilterVal(option.value)}
+                                value={{ label: explorerFilterVal === 'all' ? 'All' : explorerFilterVal, value: explorerFilterVal }}
+                              />
+                            </Stack>
+                          )}
+
+                        </Inline>
+                      </Stack>
+                    </Box>
+
+                    <Inline space="space.200" spread="space-between" alignBlock="stretch">
+                      {/* Chart */}
+                      <Box xcss={chartCardHalfStyle}>
+                        <Stack space="space.150">
+                          <Inline spread="space-between" alignBlock="center">
+                            <Heading as="h3">📊 Aggregated Results</Heading>
+                            <Badge appearance="added">{expFiltered.length} issues</Badge>
+                          </Inline>
+                          {expChart.length > 0 ? (
+                            <BarChart
+                              data={expChart}
+                              xAccessor="name"
+                              yAccessor="value"
+                              height={300}
+                              showBorder={false}
+                            />
+                          ) : (
+                            <EmptyState header="No data" description="No issues match the selected filters." />
+                          )}
+                        </Stack>
+                      </Box>
+
+                      {/* Data Table */}
+                      <Box xcss={chartCardHalfStyle}>
+                        <Stack space="space.150">
+                          <Heading as="h3">📋 Raw Data Drilldown</Heading>
+                          {expTableRows.length > 0 ? (
+                            <DynamicTable
+                              head={{
+                                cells: [
+                                  { key: 'key', content: 'Key', isSortable: false },
+                                  { key: 'summary', content: 'Summary', isSortable: false },
+                                  { key: 'status', content: 'Status', isSortable: false },
+                                  { key: 'assignee', content: 'Assignee', isSortable: false },
+                                  { key: 'priority', content: 'Priority', isSortable: false },
+                                  { key: 'type', content: 'Type', isSortable: false },
+                                  { key: 'measure', content: explorerMeasure === 'count' ? 'Metric' : explorerMeasure === 'storyPoints' ? 'SP' : 'Hours', isSortable: false }
+                                ]
+                              }}
+                              rows={expTableRows.slice(0, 100)} // show top 100
+                              rowsPerPage={5}
+                            />
+                          ) : (
+                            <EmptyState header="No data" description="Try changing filters." />
+                          )}
+                        </Stack>
+                      </Box>
+                    </Inline>
+                  </Stack>
+                </Box>
+              </TabPanel>
+
+              {/* ═══════════════════════════════════════════════════════
+               *  TAB 7: Custom Analytics Engine (Power BI Style)
+               * ═══════════════════════════════════════════════════════ */}
+              <TabPanel>
+                <Box padding="space.100" xcss={fullWidthBoxStyle}>
+                  <Stack space="space.250">
+                    
+                    {/* Widget Builder */}
+                    <Box xcss={sectionCardStyle}>
+                      <Stack space="space.150">
+                        <Heading as="h3">🛠️ Visual Builder</Heading>
+                        <Text>Design custom widgets and add them to your board.</Text>
+                        <Inline space="space.200" alignBlock="center">
+                          <Stack space="space.050">
+                            <Text><Strong>Widget Title</Strong></Text>
+                            <Textfield 
+                              value={widgetForm.title} 
+                              onChange={(e) => setWidgetForm({...widgetForm, title: e.target.value})} 
+                            />
+                          </Stack>
+
+                          <Stack space="space.050">
+                            <Text><Strong>Visual Type</Strong></Text>
+                            <Select
+                              options={[
+                                { label: 'Bar Chart', value: 'bar' },
+                                { label: 'Pie Chart', value: 'pie' }
+                              ]}
+                              onChange={(opt) => setWidgetForm({...widgetForm, type: opt.value})}
+                              value={{ label: widgetForm.type === 'bar' ? 'Bar Chart' : 'Pie Chart', value: widgetForm.type }}
+                            />
+                          </Stack>
+
+                          <Stack space="space.050">
+                            <Text><Strong>Dimension</Strong></Text>
+                            <Select
+                              options={[
+                                { label: 'Status', value: 'status' },
+                                { label: 'Assignee', value: 'assignee' },
+                                { label: 'Issue Type', value: 'type' },
+                                { label: 'Priority', value: 'priority' }
+                              ]}
+                              onChange={(opt) => setWidgetForm({...widgetForm, dimension: opt.value})}
+                              value={{ label: widgetForm.dimension.charAt(0).toUpperCase() + widgetForm.dimension.slice(1), value: widgetForm.dimension }}
+                            />
+                          </Stack>
+
+                          <Stack space="space.050">
+                            <Text><Strong>Measure</Strong></Text>
+                            <Select
+                              options={[
+                                { label: 'Issue Count', value: 'count' },
+                                { label: 'Story Points', value: 'storyPoints' },
+                                { label: 'Estimated Hours', value: 'estimatedHours' },
+                                { label: 'Logged Hours', value: 'loggedHours' }
+                              ]}
+                              onChange={(opt) => setWidgetForm({...widgetForm, measure: opt.value})}
+                              value={{ label: widgetForm.measure === 'count' ? 'Issue Count' : widgetForm.measure === 'storyPoints' ? 'Story Points' : widgetForm.measure === 'estimatedHours' ? 'Estimated Hours' : 'Logged Hours', value: widgetForm.measure }}
+                            />
+                          </Stack>
+                          
+                          <Button appearance="primary" onClick={addWidget}>➕ Add to Board</Button>
+                        </Inline>
+                      </Stack>
+                    </Box>
+
+                    {/* Custom Dashboard Canvas */}
+                    <Box xcss={sectionCardStyle}>
+                      <Stack space="space.200">
+                        <Heading as="h3">🎛️ Custom Board Canvas</Heading>
+                        {customWidgets.length === 0 ? (
+                          <EmptyState 
+                            header="Your board is empty" 
+                            description="Use the Visual Builder above to add dynamic custom widgets." 
+                          />
+                        ) : (
+                          <Inline space="space.200" spread="space-between" alignBlock="stretch" wrap="wrap">
+                            {customWidgets.map((widget) => {
+                              const widgetData = getWidgetData(widget);
+                              return (
+                                <Box key={widget.id} xcss={chartCardHalfStyle}>
+                                  <Stack space="space.100">
+                                    <Inline spread="space-between" alignBlock="center">
+                                      <Heading as="h4">{widget.title}</Heading>
+                                      <Button appearance="subtle" onClick={() => removeWidget(widget.id)}>❌</Button>
+                                    </Inline>
+                                    <Text size="small" appearance="subtlest">
+                                      By {widget.dimension} | Metric: {widget.measure}
+                                    </Text>
+                                    
+                                    {widgetData.length === 0 ? (
+                                      <Text>No data available.</Text>
+                                    ) : widget.type === 'bar' ? (
+                                      <BarChart data={widgetData} xAccessor="name" yAccessor="value" height={250} />
+                                    ) : (
+                                      <PieChart data={widgetData} xAccessor="name" yAccessor="value" height={250} />
+                                    )}
+                                  </Stack>
+                                </Box>
+                              );
+                            })}
+                          </Inline>
+                        )}
+                      </Stack>
+                    </Box>
+
+                  </Stack>
                 </Box>
               </TabPanel>
             </Tabs>

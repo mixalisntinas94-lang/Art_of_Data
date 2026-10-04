@@ -760,7 +760,7 @@ resolver.define('getProjectAnalytics', async (req) => {
     staleIssues.sort((a, b) => b.daysInactive - a.daysInactive);
 
     // Top recent issues sample for drill-down table with both Points and Hours
-    const recentIssues = issues.slice(0, 20).map((issue) => {
+    const rawIssues = issues.map((issue) => {
       const issuePoints = extractStoryPoints(issue.fields, storyPointFieldIds);
       const estSec = issue.fields?.timetracking?.originalEstimateSeconds || issue.fields?.timeestimate || 0;
       const spentSec = issue.fields?.timetracking?.timeSpentSeconds || issue.fields?.timespent || 0;
@@ -779,6 +779,8 @@ resolver.define('getProjectAnalytics', async (req) => {
         loggedHours: Math.round((spentSec / 3600) * 10) / 10,
       };
     });
+
+    const recentIssues = rawIssues.slice(0, 20);
 
     // Executive summaries for both modes
     const executiveSummaryPoints = `### 📊 Agile Pulse Brief (Story Points): ${projectKey}
@@ -842,6 +844,7 @@ resolver.define('getProjectAnalytics', async (req) => {
       teamMembers,
       staleIssues,
       recentIssues,
+      rawIssues,
       executiveSummaryPoints,
       executiveSummaryHours,
     };
