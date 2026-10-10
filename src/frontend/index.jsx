@@ -28,6 +28,7 @@ import ForgeReconciler, {
   xcss,
   BarChart,
   HorizontalBarChart,
+  PieChart,
 } from '@forge/react';
 import { invoke } from '@forge/bridge';
 
@@ -1448,6 +1449,7 @@ const App = () => {
                               yAccessor="count"
                               height={280}
                               showBorder={false}
+                              showMarkLabels={true}
                             />
                           ) : (
                             <EmptyState header="No data" description="No issues match the current filter." />
@@ -1484,6 +1486,7 @@ const App = () => {
                               yAccessor="count"
                               height={280}
                               showBorder={false}
+                              showMarkLabels={true}
                             />
                           ) : (
                             <EmptyState header="No data" description="No issue type data available." />
@@ -1548,6 +1551,7 @@ const App = () => {
                                 analytics.teamMembers.filter((m) => m.name !== 'Unassigned').length * 48
                               )}
                               showBorder={false}
+                              showMarkLabels={true}
                             />
                           ) : (
                             <EmptyState
@@ -1590,6 +1594,7 @@ const App = () => {
                               yAccessor="issues"
                               height={280}
                               showBorder={false}
+                              showMarkLabels={true}
                             />
                           ) : (
                             <EmptyState header="No data" description="No issues to display." />
@@ -1883,6 +1888,7 @@ const App = () => {
                               yAccessor="value"
                               height={300}
                               showBorder={false}
+                              showMarkLabels={true}
                             />
                           ) : (
                             <EmptyState header="No data" description="No issues match the selected filters." />
@@ -2013,9 +2019,9 @@ const App = () => {
                                     {widgetData.length === 0 ? (
                                       <Text>No data available.</Text>
                                     ) : widget.type === 'bar' ? (
-                                      <BarChart data={widgetData} xAccessor="name" yAccessor="value" height={250} />
+                                      <BarChart data={widgetData} xAccessor="name" yAccessor="value" height={250} showMarkLabels={true} />
                                     ) : (
-                                      <PieChart data={widgetData} xAccessor="name" yAccessor="value" height={250} />
+                                      <PieChart data={widgetData} labelAccessor="name" valueAccessor="value" colorAccessor="name" height={250} showMarkLabels={true} />
                                     )}
                                   </Stack>
                                 </Box>
