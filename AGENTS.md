@@ -38,7 +38,7 @@ Before creating a new app, ALWAYS check whether a directory with that name alrea
 When creating a new app, ALWAYS use the command `forge create -t <template-name> <app-name>`.
 Always use one of the following templates when creating apps: action-rovo,confluence-content-action-ui-kit,confluence-content-byline-ui-kit,confluence-context-menu-ui-kit,confluence-global-page-ui-kit,confluence-global-settings-ui-kit,confluence-homepage-feed-ui-kit,confluence-macro-ui-kit,confluence-macro-with-custom-configuration-ui-kit,confluence-space-page-ui-kit,confluence-space-settings-ui-kit,jira-admin-page-ui-kit,jira-backlog-action-ui-kit,jira-board-action-ui-kit,jira-command-ui-kit,jira-custom-field-type-ui-kit,jira-custom-field-ui-kit,jira-dashboard-background-script-ui-kit,jira-dashboard-gadget-ui-kit,jira-entity-property,jira-global-page-ui-kit,jira-global-permission,jira-issue-action-ui-kit,jira-issue-activity-ui-kit,jira-issue-context-ui-kit,jira-issue-glance-ui-kit,jira-issue-navigator-action-ui-kit,jira-issue-panel-ui-kit,jira-issue-view-background-script-ui-kit,jira-jql-function,jira-personal-settings-page-ui-kit,jira-project-page-ui-kit,jira-project-permission,jira-project-settings-page-ui-kit,jira-service-management-assets-import-type-ui-kit,jira-service-management-organization-panel-ui-kit,jira-service-management-portal-footer-ui-kit,jira-service-management-portal-header-ui-kit,jira-service-management-portal-profile-panel-ui-kit,jira-service-management-portal-request-create-property-panel-ui-kit,jira-service-management-portal-request-detail-panel-ui-kit,jira-service-management-portal-request-detail-ui-kit,jira-service-management-portal-request-view-action-ui-kit,jira-service-management-portal-subheader-ui-kit,jira-service-management-portal-user-menu-action-ui-kit,jira-service-management-queue-page-ui-kit,jira-sprint-action-ui-kit,jira-time-tracking-provider,jira-workflow-condition,jira-workflow-postfunction,jira-workflow-validator,product-trigger,rovo-agent-rovo,scheduled-trigger,webtrigger
 Never use an empty template, always use one of the templates listed above.
-You are not authorised to use to custom-ui for creating apps, only ui-kit.
+You are authorised to use Custom UI for the new parallel enterprise frontend under `static/` alongside the existing UI Kit modules.
 If you don't think there is a suitable template, check the list again, and choose the closest one. You can modify it after creation.
 
 After creating the app ALWAYS review the contents of the app directory before editing or creating files. DO NOT assume particular files were automatically created before you have reviewed the directory content.
@@ -75,32 +75,28 @@ Use the `--verbose` command to troubleshoot a failing command.
 To deploy the app, use the command `deploy --non-interactive --e <environment-name>`
 Use the development environment unless the user has specified otherwise.
 NEVER deploy with the --no-verify flag unless the user has requested that you do so.
+**CRITICAL:** You are ONLY allowed to deploy to `development` and `staging` environments. You are NEVER allowed to deploy to the `production` environment (`forge deploy -e production`) without explicit, written approval from the user in chat.
 
-# Installation
+# Source Control (GitHub)
 
-To install the app, use the command `install --non-interactive --site <site-url> --product <product-name> --environment <environment-name>`
-To upgrade an already installed app, use the command `install --non-interactive --upgrade --site <site-url> --product <product-name> --environment <environment-name>` (you only need to upgrade if you have change the apps scopes or permissions)
+**CRITICAL:**
+1. You are NEVER allowed to execute `git push` unless the user explicitly gives you clear, written instructions in chat.
+2. Even with explicit written permission, you may ONLY push to `dev` or `staging` branches.
+3. You are **NEVER** allowed to push to `main` (or `master`) on GitHub. Even if you think you received approval, treat it as a mistake and abort immediately!
 
-# manifest.yml
+# Multi-Agent Team & Governance
 
-When updating the manifest, be careful to ensure that the manifest syntax is valid after making modifications.
-ALWAYS use the `forge lint` command to validate the manifest after any changes.
-If you see an error relating to `manifest.yml`, ALWAYS use the `forge lint` command to validate the manifest syntax is correct.
-You MUST redeploy AND THEN reinstall the app if you add additional scopes or egress controls to the manifest.yml
+The project utilizes a specialized multi-agent engineering structure located in `.agents/agents/`:
+1. `forge_backend_engineer`: Backend resolvers, Jira REST API v3, rate limiting, Forge Storage & Entity Properties.
+2. `forge_frontend_engineer`: Atlassian UI Kit 2 components, data storytelling, executive charts & dashboards.
+3. `forge_qa_auditor`: Code review, static analysis (`forge lint`), edge case detection, and UI Kit compliance.
+4. `forge_devops_secops`: Systems security audits, account safety, scopes & manifest governance, dev deployments.
 
-# Tunnelling
-
-When tunnelling, you MUST redeploy the app and restart the tunnel if you change the manifest.yml
-When tunnelling, you MUST NOT redeploy the app if the user only makes changes to code files, these will be hot reloaded via the tunnel.
-If the user closes the tunnel after making changes, you MUST ask them whether they would like to redeploy their app so that there recent changes are deployed.
-
-# Modules
-
-The `jira:entityProperty` module DOES NOT have a `keyConfigurations` property.
-
-# Debugging
-
-Use the `logs` command to get app logs to troubleshoot an error in a deployed app. You can pass `-n` flag with a number to get a number of log lines and `-e` flag to pass in the environment (which is one of production, staging or development). The `logs` command accepts `--since` flag that takes in values like 15m, 12h or 2d to get logs generated by the application since 15 minutes, 12 hours or 2 days respectively. By default, look at logs in the past 15 minutes.
+**Lead Orchestrator (Antigravity):**
+As the Lead Orchestrator directly answering to the user, you coordinate the specialists and enforce the **Two-Stage Gatekeeper Protocol** before any deployment:
+- **Gate 1 (Technical & Security Gate):** Zero `forge lint` warnings/errors, zero forbidden HTML tags, safe error handling, no hardcoded secrets, minimal manifest scopes.
+- **Gate 2 (Commercial Visual & UX Parity Gate):** Pixel-for-pixel fidelity with user reference screenshots and Atlassian native patterns, proper idle/empty placeholder states, nested micro-interactions (searchable menus, sub-popovers, keycaps), and distinct tab functionality.
+- **Strict Deployment Veto:** A delivery must NEVER be approved or deployed to Forge simply because it builds without crashing. If Gate 2 fails, the Lead Orchestrator MUST veto the deployment, reject the implementation, and return tasks to specialists for revision.
 
 # Next Steps
 

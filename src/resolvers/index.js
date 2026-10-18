@@ -86,6 +86,39 @@ async function getStoryPointFieldIds() {
   return cachedStoryPointFields || Array.from(detectedFieldIds);
 }
 
+let cachedSprintFields = null;
+let lastSprintFieldCacheTime = 0;
+
+/**
+ * Dynamically discovers sprint custom field IDs in Jira.
+ */
+async function getSprintFieldIds() {
+  const now = Date.now();
+  if (cachedSprintFields && now - lastSprintFieldCacheTime < FIELD_CACHE_TTL_MS) {
+    return cachedSprintFields;
+  }
+
+  const detected = new Set(['sprint', 'customfield_10020', 'customfield_10010']);
+  try {
+    const fields = await fetchJira(route`/rest/api/3/field`);
+    if (Array.isArray(fields)) {
+      fields.forEach((field) => {
+        const fieldName = (field.name || '').toLowerCase();
+        const customType = (field.schema?.custom || '').toLowerCase();
+        if (fieldName === 'sprint' || customType.includes('sprint') || customType.includes('gh-sprint')) {
+          detected.add(field.id);
+        }
+      });
+    }
+    cachedSprintFields = Array.from(detected);
+    lastSprintFieldCacheTime = now;
+  } catch (err) {
+    console.warn('Could not discover sprint fields dynamically:', err.message);
+  }
+
+  return cachedSprintFields || Array.from(detected);
+}
+
 /**
  * Helper to fetch Jira issues with automatic pagination.
  * Loops through pages of 100 issues up to maxTotalIssues (default 1000).
@@ -307,20 +340,136 @@ resolver.define('getProjectFilterOptions', async (req) => {
             { label: 'Lowest', value: 'Lowest' },
           ];
 
+    // Multi-source Sprint Discovery: JQL Autocomplete, Issue fields, and Agile Boards
+    const discoveredSprintsMap = new Map();
+    const sprintFieldIds = await getSprintFieldIds();
+
+    // 1. Try JQL Autocomplete suggestions for field "sprint"
+    try {
+      const suggestionsRes = await fetchJira(route`/rest/api/3/jql/autocompletedata/suggestions?fieldName=sprint`);
+      if (suggestionsRes && Array.isArray(suggestionsRes.results)) {
+        suggestionsRes.results.forEach((s) => {
+          if (s.value) {
+            discoveredSprintsMap.set(s.value, {
+              name: s.displayName || s.value,
+              value: s.value,
+              state: 'sprint',
+            });
+          }
+        });
+      }
+    } catch (suggErr) {
+      // JQL autocomplete endpoint not available
+    }
+
+    // 2. Query recent project issues that have sprints assigned
+    try {
+      const sprintIssues = await fetchJira(route`/rest/api/3/search/jql`, {
+        method: 'POST',
+        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jql: `project = "${projectKey}" AND sprint is not EMPTY ORDER BY updated DESC`,
+          maxResults: 50,
+          fields: ['summary', ...sprintFieldIds],
+        }),
+      });
+
+      const issueList = sprintIssues?.issues || [];
+      issueList.forEach((issue) => {
+        const f = issue.fields || {};
+        sprintFieldIds.forEach((sFieldId) => {
+          const val = f[sFieldId];
+          if (Array.isArray(val)) {
+            val.forEach((s) => {
+              if (s && s.name) {
+                discoveredSprintsMap.set(s.name, {
+                  name: s.name,
+                  value: s.name,
+                  state: (s.state || '').toLowerCase(),
+                });
+              }
+            });
+          } else if (val && typeof val === 'object' && val.name) {
+            discoveredSprintsMap.set(val.name, {
+              name: val.name,
+              value: val.name,
+              state: (val.state || '').toLowerCase(),
+            });
+          }
+        });
+      });
+    } catch (issueSprintErr) {
+      // Ignore if search fallback fails
+    }
+
+    // 3. Try Agile Board Sprints if accessible
+    try {
+      const boardData = await fetchJira(route`/rest/agile/1.0/board?projectKeyOrId=${projectKey}`);
+      if (boardData && Array.isArray(boardData.values) && boardData.values.length > 0) {
+        const boardId = boardData.values[0].id;
+        const sprintsData = await fetchJira(route`/rest/agile/1.0/board/${boardId}/sprint?maxResults=50`);
+        if (sprintsData && Array.isArray(sprintsData.values)) {
+          sprintsData.values.forEach((s) => {
+            if (s && s.name) {
+              discoveredSprintsMap.set(s.name, {
+                name: s.name,
+                value: s.name,
+                state: (s.state || '').toLowerCase(),
+              });
+            }
+          });
+        }
+      }
+    } catch (agileErr) {
+      // Board/agile API not available
+    }
+
+    // Categorize discovered sprints into Active, Future, and Closed
+    const activeNamedSprints = [];
+    const futureNamedSprints = [];
+    const closedNamedSprints = [];
+
+    Array.from(discoveredSprintsMap.values()).forEach((s) => {
+      const stateBadge =
+        s.state === 'active' ? ' (Active)' : s.state === 'future' ? ' (Future)' : s.state === 'closed' ? ' (Closed)' : '';
+      const option = {
+        label: `${s.name}${stateBadge}`,
+        value: s.value,
+        state: s.state,
+      };
+      if (s.state === 'active') {
+        activeNamedSprints.push(option);
+      } else if (s.state === 'future') {
+        futureNamedSprints.push(option);
+      } else {
+        closedNamedSprints.push(option);
+      }
+    });
+
+    const sprintsOptions = [
+      // Primary Default View
+      { label: 'Active Sprint (Current)', value: 'active' },
+
+      // Individual Sprints List (Active first, then Future, then Closed)
+      ...activeNamedSprints,
+      ...futureNamedSprints,
+      ...closedNamedSprints,
+
+      // Quick Scope Presets
+      { label: 'All Sprints & Project Scope', value: 'all' },
+      { label: 'All Future Sprints', value: 'future' },
+      { label: 'All Closed Sprints', value: 'closed' },
+      { label: 'Backlog Only (No Sprint)', value: 'backlog' },
+    ];
+
     return {
       success: true,
       assignees: [
         { label: 'All Assignees', value: 'all' },
-        { label: '👤 Unassigned', value: 'unassigned' },
+        { label: 'Unassigned', value: 'unassigned' },
         ...assignees,
       ],
-      sprints: [
-        { label: 'All Sprints', value: 'all' },
-        { label: '🏃 Active Sprint', value: 'active' },
-        { label: '📅 Future Sprints', value: 'future' },
-        { label: '📦 Backlog (No Sprint)', value: 'backlog' },
-        { label: '🏁 Closed Sprints', value: 'closed' },
-      ],
+      sprints: sprintsOptions,
       issueTypes: [
         { label: 'All Issue Types', value: 'all' },
         ...Array.from(issueTypesMap.values()),
@@ -503,6 +652,8 @@ resolver.define('getProjectAnalytics', async (req) => {
 
     const jql = `${jqlClauses.join(' AND ')} ${customOrderBy}`;
 
+    const sprintFieldIds = await getSprintFieldIds();
+
     const fieldsList = [
       'summary',
       'status',
@@ -516,11 +667,89 @@ resolver.define('getProjectAnalytics', async (req) => {
       'timeestimate',
       'timespent',
       ...storyPointFieldIds,
+      ...sprintFieldIds,
     ];
 
     // Fetch all matching issues using paginated search (up to 1,000 issues)
-    const { issues, totalFound, isTruncated } = await fetchAllIssues(jql, fieldsList, 1000);
+    let fetchResult;
+    let sprintFallbackOccurred = false;
+    try {
+      fetchResult = await fetchAllIssues(jql, fieldsList, 1000);
+    } catch (fetchErr) {
+      if (
+        sprint === 'active' &&
+        fetchErr.message &&
+        (fetchErr.message.toLowerCase().includes('opensprints') ||
+          fetchErr.message.toLowerCase().includes('sprint'))
+      ) {
+        sprintFallbackOccurred = true;
+        const fallbackClauses = jqlClauses.filter((c) => !c.includes('openSprints'));
+        const fallbackJql = `${fallbackClauses.join(' AND ')} ${customOrderBy}`;
+        fetchResult = await fetchAllIssues(fallbackJql, fieldsList, 1000);
+      } else {
+        throw fetchErr;
+      }
+    }
+    const { issues, totalFound, isTruncated } = fetchResult;
     const now = Date.now();
+
+    // Discover active sprint name and collect all project sprints from issues
+    let activeSprintName = null;
+    let activeSprintStartDate = null;
+    let activeSprintEndDate = null;
+    const projectSprintsMap = new Map();
+
+    for (const issue of issues) {
+      const f = issue.fields || {};
+      for (const fieldId of sprintFieldIds) {
+        const val = f[fieldId];
+        if (Array.isArray(val)) {
+          val.forEach((item) => {
+            if (item && item.name) {
+              const state = (item.state || '').toLowerCase();
+              if (state === 'active' && !activeSprintName) {
+                activeSprintName = item.name;
+                activeSprintStartDate = item.startDate || null;
+                activeSprintEndDate = item.endDate || null;
+              }
+              projectSprintsMap.set(item.name, {
+                name: item.name,
+                value: item.name,
+                state: state || 'closed',
+                startDate: item.startDate || null,
+                endDate: item.endDate || null,
+              });
+            }
+          });
+        } else if (val && typeof val === 'object' && val.name) {
+          const state = (val.state || '').toLowerCase();
+          if (state === 'active' && !activeSprintName) {
+            activeSprintName = val.name;
+            activeSprintStartDate = val.startDate || null;
+            activeSprintEndDate = val.endDate || null;
+          }
+          projectSprintsMap.set(val.name, {
+            name: val.name,
+            value: val.name,
+            state: state || 'closed',
+            startDate: val.startDate || null,
+            endDate: val.endDate || null,
+          });
+        }
+      }
+    }
+
+    // Sprint Time Elapsed Percentage (for real pacing vs work done)
+    let sprintTimeElapsedPercent = 50; // Default midpoint for active sprint
+    if (activeSprintStartDate && activeSprintEndDate) {
+      const startMs = new Date(activeSprintStartDate).getTime();
+      const endMs = new Date(activeSprintEndDate).getTime();
+      const totalSprintMs = endMs - startMs;
+      if (totalSprintMs > 0) {
+        const elapsed = Math.max(0, now - startMs);
+        sprintTimeElapsedPercent = Math.min(100, Math.max(0, Math.round((elapsed / totalSprintMs) * 100)));
+      }
+    }
 
     // 3. KPI Aggregations (tracking both Story Points & Time/Hours)
     let totalStoryPoints = 0;
@@ -544,6 +773,7 @@ resolver.define('getProjectAnalytics', async (req) => {
 
     const assigneeMap = {};
     const typeMap = {};
+    const typePointsMap = {};
     const priorityMap = {};
     const statusMap = {};
     const staleIssues = [];
@@ -581,6 +811,7 @@ resolver.define('getProjectAnalytics', async (req) => {
       const issuePoints = isEstimatedPoints ? points : 0;
 
       totalStoryPoints += issuePoints;
+      typePointsMap[typeName] = (typePointsMap[typeName] || 0) + issuePoints;
       if (isDone) {
         completedStoryPoints += issuePoints;
       } else if (isInProgress) {
@@ -743,6 +974,7 @@ resolver.define('getProjectAnalytics', async (req) => {
     const typeChartData = Object.keys(typeMap).map((name) => ({
       name,
       value: typeMap[name],
+      storyPoints: Math.round((typePointsMap[name] || 0) * 10) / 10,
     }));
 
     const statusChartData = [
@@ -765,6 +997,12 @@ resolver.define('getProjectAnalytics', async (req) => {
       const estSec = issue.fields?.timetracking?.originalEstimateSeconds || issue.fields?.timeestimate || 0;
       const spentSec = issue.fields?.timetracking?.timeSpentSeconds || issue.fields?.timespent || 0;
 
+      const isDone = issue.fields?.status?.statusCategory?.key === 'done' || !!issue.fields?.resolutiondate;
+      const isInProgress = issue.fields?.status?.statusCategory?.key === 'indeterminate';
+      const updatedMs = issue.fields?.updated ? new Date(issue.fields.updated).getTime() : now;
+      const daysInactive = Math.floor((now - updatedMs) / (1000 * 60 * 60 * 24));
+      const isStale = (isInProgress || !isDone) && daysInactive >= 3;
+
       return {
         id: issue.id,
         key: issue.key,
@@ -774,9 +1012,18 @@ resolver.define('getProjectAnalytics', async (req) => {
         statusCategory: issue.fields?.status?.statusCategory?.key || 'new',
         priority: issue.fields?.priority?.name || 'Medium',
         assignee: issue.fields?.assignee?.displayName || 'Unassigned',
+        avatarUrl: issue.fields?.assignee?.avatarUrls
+          ? (issue.fields.assignee.avatarUrls['32x32'] ||
+             issue.fields.assignee.avatarUrls['24x24'] ||
+             issue.fields.assignee.avatarUrls['48x48'] ||
+             issue.fields.assignee.avatarUrls['16x16'])
+          : null,
         storyPoints: issuePoints,
         estimatedHours: Math.round((estSec / 3600) * 10) / 10,
         loggedHours: Math.round((spentSec / 3600) * 10) / 10,
+        updated: issue.fields?.updated,
+        daysInactive,
+        isStale,
       };
     });
 
@@ -813,6 +1060,13 @@ resolver.define('getProjectAnalytics', async (req) => {
       appliedJql: jql,
       totalFound,
       isTruncated,
+      sprintScope: sprint || 'active',
+      activeSprintName,
+      activeSprintStartDate,
+      activeSprintEndDate,
+      sprintTimeElapsedPercent,
+      detectedSprints: Array.from(projectSprintsMap.values()),
+      sprintFallbackOccurred,
       kpis: {
         totalIssues,
         completedCount,
@@ -822,6 +1076,8 @@ resolver.define('getProjectAnalytics', async (req) => {
         // Story Points KPIs
         totalStoryPoints,
         completedStoryPoints,
+        inProgressStoryPoints: Math.round(inProgressStoryPoints * 10) / 10,
+        toDoStoryPoints: Math.round(toDoStoryPoints * 10) / 10,
         remainingStoryPoints,
         unestimatedPointsCount,
         // Hours KPIs
