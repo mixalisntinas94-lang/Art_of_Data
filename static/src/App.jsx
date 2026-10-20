@@ -10,6 +10,7 @@ import {
 import { useFilterStore } from './store/useFilterStore';
 import GlobalContextBar from './components/GlobalContextBar';
 import SprintView from './views/SprintView';
+import CustomExplorerView from './views/CustomExplorerView';
 import ProjectReleaseView from './views/ProjectReleaseView';
 import PortfolioCompanyView from './views/PortfolioCompanyView';
 
@@ -401,8 +402,9 @@ export default function App() {
         </div>
       </header>
 
-      {/* ── ACTIVE CROSS-FILTERS BAR ── */}
-      <div className="mt-4 p-3 rounded-xl bg-slate-900/90 border border-slate-800 flex flex-wrap items-center justify-between gap-3 shadow-sm">
+      {/* ── ACTIVE CROSS-FILTERS BAR (SPRINT SCOPE ONLY) ── */}
+      {currentScope === 'sprint' && (
+        <div className="mt-4 p-3 rounded-xl bg-slate-900/90 border border-slate-800 flex flex-wrap items-center justify-between gap-3 shadow-sm">
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-xs font-bold text-slate-400 flex items-center gap-1.5 uppercase tracking-wider">
             <Filter className="w-3.5 h-3.5 text-cyan-400" />
@@ -476,6 +478,7 @@ export default function App() {
           </button>
         )}
       </div>
+      )}
 
       {/* ── ERROR STATE ── */}
       {error && (
@@ -540,6 +543,14 @@ export default function App() {
               lastRefreshed={lastRefreshed}
               activeSprintStartDate={analytics?.activeSprintStartDate}
               activeSprintEndDate={analytics?.activeSprintEndDate}
+            />
+          )}
+
+          {currentScope === 'explorer' && (
+            <CustomExplorerView
+              allIssues={allIssues}
+              projects={projects}
+              selectedProject={selectedProject}
             />
           )}
 

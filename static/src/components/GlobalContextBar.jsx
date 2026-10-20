@@ -1,14 +1,15 @@
 import React from 'react';
-import { Zap, Layers, Briefcase, ChevronRight, Sparkles } from 'lucide-react';
+import { Zap, Layers, Briefcase, ChevronRight, Sparkles, LayoutGrid } from 'lucide-react';
 import { useFilterStore } from '../store/useFilterStore';
 
 /**
  * Global Context Bar - Executive Routing & Scope Selector
  *
- * Provides Context Switching across 3 enterprise levels:
+ * Provides Context Switching across 4 enterprise levels:
  * 1. Active Sprint (Tactical Delivery Engine - Current Active Scope)
- * 2. Project / Release (Release & Milestones Planning - Coming Soon)
- * 3. Portfolio / Company (C-Level Executive Strategy - Coming Soon)
+ * 2. Custom Explorer (Self-Service Analytics Builder & Drag & Drop BI Canvas)
+ * 3. Project / Release (Release & Milestones Planning - Coming Soon)
+ * 4. Portfolio / Company (C-Level Executive Strategy - Coming Soon)
  */
 export default function GlobalContextBar({ projectKey, activeSprintName }) {
   const { currentScope, setCurrentScope } = useFilterStore();
@@ -20,6 +21,14 @@ export default function GlobalContextBar({ projectKey, activeSprintName }) {
       icon: Zap,
       enabled: true,
       description: 'Sprint health, velocity, blockers & daily team flow',
+    },
+    {
+      id: 'explorer',
+      label: 'Custom Explorer',
+      icon: LayoutGrid,
+      enabled: true,
+      badge: 'BI Studio',
+      description: 'Self-service drag & drop BI canvas with Apache ECharts',
     },
     {
       id: 'project',
@@ -86,8 +95,12 @@ export default function GlobalContextBar({ projectKey, activeSprintName }) {
         </span>
         <ChevronRight className="w-3 h-3 text-slate-600" />
         <span className="text-white font-medium flex items-center gap-1.5">
-          <span className="w-2 h-2 rounded-full bg-emerald-400 shadow-sm shadow-emerald-400/80" />
-          {activeSprintName || 'Active Sprint View'}
+          <span
+            className={`w-2 h-2 rounded-full ${
+              currentScope === 'explorer' ? 'bg-cyan-400 shadow-cyan-400/80' : 'bg-emerald-400 shadow-emerald-400/80'
+            } shadow-sm`}
+          />
+          {currentScope === 'explorer' ? 'Custom Report Builder' : activeSprintName || 'Active Sprint View'}
         </span>
       </div>
     </div>

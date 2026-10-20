@@ -20,3 +20,52 @@
 ::-webkit-scrollbar-thumb:hover {
   background: #475569;
 }
+
+/* React Grid Layout Dark Mode Enhancements */
+.react-grid-item.react-grid-placeholder {
+  background: rgba(14, 165, 233, 0.12) !important;
+  border: 2px dashed rgba(56, 189, 248, 0.6) !important;
+  border-radius: 1rem !important;
+  transition-duration: 100ms;
+  z-index: 2;
+  user-select: none;
+}
+
+.react-grid-item.resizing {
+  z-index: 10;
+  box-shadow: 0 0 20px rgba(56, 189, 248, 0.25);
+}
+
+.react-grid-item.react-draggable-dragging {
+  z-index: 20;
+  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.5);
+  opacity: 0.95;
+}
+
+.react-grid-item > .react-resizable-handle {
+  width: 18px;
+  height: 18px;
+  bottom: 6px;
+  right: 6px;
+  cursor: se-resize;
+  background-image: none;
+}
+
+.react-grid-item > .react-resizable-handle::after {
+  content: "";
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  width: 6px;
+  height: 6px;
+  border-right: 2px solid #64748b;
+  border-bottom: 2px solid #64748b;
+  transition: all 0.2s ease;
+}
+
+.react-grid-item:hover > .react-resizable-handle::after {
+  border-right-color: #38bdf8;
+  border-bottom-color: #38bdf8;
+  box-shadow: 1px 1px 4px rgba(56, 189, 248, 0.5);
+}
+
