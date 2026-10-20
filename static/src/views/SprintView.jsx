@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import {
   Activity,
   AlertTriangle,
@@ -27,26 +27,42 @@ import {
   LabelList,
   ReferenceLine,
 } from 'recharts';
+import { getKpiTheme, computeLiveSparkline } from '../utils/kpiTheme';
 
 /**
  * Lightweight SVG Sparkline component
  * Renders smooth micro-trends for executive KPI cards with area fill
+ * Strictly renders an absolute straight flat line if metric values are 0 or constant
  */
 function Sparkline({ data, color = '#3b82f6', height = 28 }) {
   if (!data || data.length < 2) return null;
   const min = Math.min(...data);
   const max = Math.max(...data);
-  const range = max - min || 1;
+  const isFlat = max === min;
   const width = 120;
 
-  const points = data.map((val, idx) => {
-    const x = (idx / (data.length - 1)) * width;
-    const y = height - ((val - min) / range) * (height - 8) - 4;
-    return `${x.toFixed(1)},${y.toFixed(1)}`;
-  });
+  let points;
+  let linePath;
+  let areaPath;
 
-  const linePath = `M ${points.join(' L ')}`;
-  const areaPath = `${linePath} L ${width},${height} L 0,${height} Z`;
+  if (isFlat) {
+    // If the metric value is 0 or unchanged throughout, render an absolute flat horizontal line
+    const val = data[0];
+    const y = val === 0 ? height - 4 : val >= 100 ? 6 : height / 2;
+    points = [`0,${y.toFixed(1)}`, `${width},${y.toFixed(1)}`];
+    linePath = `M 0,${y.toFixed(1)} L ${width},${y.toFixed(1)}`;
+    areaPath = `${linePath} L ${width},${height} L 0,${height} Z`;
+  } else {
+    const range = max - min;
+    points = data.map((val, idx) => {
+      const x = (idx / (data.length - 1)) * width;
+      const y = height - ((val - min) / range) * (height - 8) - 4;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    });
+    linePath = `M ${points.join(' L ')}`;
+    areaPath = `${linePath} L ${width},${height} L 0,${height} Z`;
+  }
+
   const gradId = `sparkGrad-${color.replace(/[^a-zA-Z0-9]/g, '')}`;
 
   return (
@@ -81,7 +97,7 @@ function Sparkline({ data, color = '#3b82f6', height = 28 }) {
  *
  * Locked-down visual layout:
  * - Executive diagnosis banner & real-time pacing warning
- * - 5 Top KPI Hero cards with sparklines & color glows
+ * - 5 Top KPI Hero cards with dynamic conditional coloring & live 1:1 sparklines
  * - Status Donut chart with neon cyan center badge & vertical legend
  * - Types of Work bar chart with purple-blue glow & Category Insights panel
  * - Effort Allocation horizontal bar chart with 40 SP capacity reference line
@@ -110,7 +126,58 @@ export default function SprintView({
   isBehindSchedule,
   isSlightlyBehind,
   lastRefreshed,
+  activeSprintStartDate,
+  activeSprintEndDate,
 }) {
+  // ── DYNAMIC CONDITIONAL THEMING (Global Utility Engine) ──
+  const completionTheme = useMemo(
+    () => getKpiTheme('completion', kpis, { sprintTimeElapsed }),
+    [kpis, sprintTimeElapsed]
+  );
+  const velocityTheme = useMemo(
+    () => getKpiTheme('velocity', kpis, { sprintTimeElapsed }),
+    [kpis, sprintTimeElapsed]
+  );
+  const defectTheme = useMemo(
+    () => getKpiTheme('defect', kpis),
+    [kpis]
+  );
+  const estimationTheme = useMemo(
+    () => getKpiTheme('estimation', kpis),
+    [kpis]
+  );
+  const cycleTimeTheme = useMemo(
+    () => getKpiTheme('cycleTime', kpis),
+    [kpis]
+  );
+
+  // ── STRICT 1:1 LIVE SPARKLINES BINDING ──
+  const sprintMeta = useMemo(() => ({
+    startDate: activeSprintStartDate || analytics?.activeSprintStartDate,
+    endDate: activeSprintEndDate || analytics?.activeSprintEndDate,
+  }), [activeSprintStartDate, activeSprintEndDate, analytics?.activeSprintStartDate, analytics?.activeSprintEndDate]);
+
+  const completionSparkline = useMemo(
+    () => computeLiveSparkline(filteredIssues, 'completion', sprintMeta),
+    [filteredIssues, sprintMeta]
+  );
+  const velocitySparkline = useMemo(
+    () => computeLiveSparkline(filteredIssues, 'velocity', sprintMeta),
+    [filteredIssues, sprintMeta]
+  );
+  const defectSparkline = useMemo(
+    () => computeLiveSparkline(filteredIssues, 'defects', sprintMeta),
+    [filteredIssues, sprintMeta]
+  );
+  const estimationSparkline = useMemo(
+    () => computeLiveSparkline(filteredIssues, 'estimation', sprintMeta),
+    [filteredIssues, sprintMeta]
+  );
+  const cycleTimeSparkline = useMemo(
+    () => computeLiveSparkline(filteredIssues, 'cycleTime', sprintMeta),
+    [filteredIssues, sprintMeta]
+  );
+
   return (
     <div className="space-y-6">
       {/* ════ 1. EXECUTIVE DIAGNOSIS BANNER ════ */}
@@ -146,19 +213,19 @@ export default function SprintView({
         </div>
       </div>
 
-      {/* ════ 2. HIGH-IMPACT TOP KPI HERO CARDS (WITH REAL PACING CHECK) ════ */}
+      {/* ════ 2. HIGH-IMPACT TOP KPI HERO CARDS (WITH REAL PACING & CONDITIONAL THEME) ════ */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
         
         {/* Card 1: Completion & Time-vs-Work Pacing */}
-        <div className="relative overflow-hidden p-4 rounded-xl bg-slate-900/90 border border-slate-800 border-t-2 border-t-emerald-500 hover:border-slate-700 transition-all flex flex-col justify-between group shadow-sm">
-          <div className="absolute top-0 left-0 w-24 h-24 bg-emerald-500/15 rounded-full blur-xl pointer-events-none -translate-x-1/2 -translate-y-1/2" />
+        <div className={`relative overflow-hidden p-4 rounded-xl bg-slate-900/90 border border-slate-800 border-t-2 ${completionTheme.topBorderClass} hover:border-slate-700 transition-all flex flex-col justify-between group shadow-sm`}>
+          <div className={`absolute top-0 left-0 w-24 h-24 ${completionTheme.glowBgClass} rounded-full blur-xl pointer-events-none -translate-x-1/2 -translate-y-1/2`} />
           <div className="flex items-center justify-between text-xs text-slate-400 font-semibold tracking-wider relative z-10">
             <span>COMPLETION & PACING</span>
-            <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+            <CheckCircle2 className={`w-4 h-4 ${completionTheme.iconColorClass}`} />
           </div>
 
           <div className="mt-2 mb-1 relative z-10 flex items-baseline justify-between">
-            <span className="text-4xl font-extrabold tracking-tight text-white">
+            <span className={`text-4xl font-extrabold tracking-tight ${completionTheme.textColorClass}`}>
               {kpis.completionRate}%
             </span>
             <span className="text-xs font-semibold text-slate-400">
@@ -166,11 +233,11 @@ export default function SprintView({
             </span>
           </div>
 
-          {/* Sparkline for Completion */}
+          {/* Strictly Live Bound Sparkline for Completion */}
           <div className="relative z-10">
             <Sparkline
-              data={[15, 22, 35, 48, 55, Math.max(20, kpis.completionRate)]}
-              color={isBehindSchedule ? '#f43f5e' : '#10b981'}
+              data={completionSparkline}
+              color={completionTheme.colorHex}
             />
           </div>
 
@@ -178,18 +245,16 @@ export default function SprintView({
           <div className="relative z-10 mt-1 space-y-1">
             <div className="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden">
               <div
-                className={`h-full rounded-full transition-all duration-500 ${
-                  isBehindSchedule ? 'bg-rose-500' : 'bg-emerald-500'
-                }`}
+                className={`h-full rounded-full transition-all duration-500 ${completionTheme.barClass}`}
                 style={{ width: `${kpis.completionRate}%` }}
               />
             </div>
           </div>
 
-          {/* Explicit Behind Schedule Pacing Badge */}
+          {/* Explicit Dynamic Pacing Badge */}
           <div className="relative z-10 mt-2">
             {isBehindSchedule ? (
-              <div className="flex items-center justify-between px-2 py-1 rounded-md bg-rose-500/20 text-rose-400 border border-rose-500/30 text-[11px] font-bold">
+              <div className={`flex items-center justify-between px-2 py-1 rounded-md text-[11px] font-bold border ${completionTheme.badgeClass}`}>
                 <span className="flex items-center gap-1">
                   <AlertTriangle className="w-3.5 h-3.5" />
                   Behind Schedule
@@ -197,15 +262,15 @@ export default function SprintView({
                 <span className="font-mono">-{paceGap}% gap</span>
               </div>
             ) : isSlightlyBehind ? (
-              <div className="flex items-center justify-between px-2 py-1 rounded-md bg-amber-500/20 text-amber-400 border border-amber-500/30 text-[11px] font-bold">
+              <div className={`flex items-center justify-between px-2 py-1 rounded-md text-[11px] font-bold border ${completionTheme.badgeClass}`}>
                 <span className="flex items-center gap-1">
                   <Clock className="w-3.5 h-3.5" />
-                  Slightly Behind
+                  Behind Schedule
                 </span>
                 <span className="font-mono">-{paceGap}%</span>
               </div>
             ) : (
-              <div className="flex items-center justify-between px-2 py-1 rounded-md bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 text-[11px] font-bold">
+              <div className={`flex items-center justify-between px-2 py-1 rounded-md text-[11px] font-bold border ${completionTheme.badgeClass}`}>
                 <span className="flex items-center gap-1">
                   <CheckCircle2 className="w-3.5 h-3.5" />
                   On Track
@@ -221,21 +286,21 @@ export default function SprintView({
         </div>
 
         {/* Card 2: Delivered Velocity */}
-        <div className="relative overflow-hidden p-4 rounded-xl bg-slate-900/90 border border-slate-800 border-t-2 border-t-blue-500 hover:border-slate-700 transition-all flex flex-col justify-between group shadow-sm">
-          <div className="absolute top-0 left-0 w-24 h-24 bg-blue-500/15 rounded-full blur-xl pointer-events-none -translate-x-1/2 -translate-y-1/2" />
+        <div className={`relative overflow-hidden p-4 rounded-xl bg-slate-900/90 border border-slate-800 border-t-2 ${velocityTheme.topBorderClass} hover:border-slate-700 transition-all flex flex-col justify-between group shadow-sm`}>
+          <div className={`absolute top-0 left-0 w-24 h-24 ${velocityTheme.glowBgClass} rounded-full blur-xl pointer-events-none -translate-x-1/2 -translate-y-1/2`} />
           <div className="flex items-center justify-between text-xs text-slate-400 font-semibold tracking-wider relative z-10">
             <span>{metricMode === 'hours' ? 'LOGGED EFFORT' : 'DELIVERED VELOCITY'}</span>
-            <TrendingUp className="w-4 h-4 text-blue-400" />
+            <TrendingUp className={`w-4 h-4 ${velocityTheme.iconColorClass}`} />
           </div>
           <div className="mt-2 mb-1 relative z-10">
-            <span className="text-4xl font-extrabold tracking-tight text-white">
+            <span className={`text-4xl font-extrabold tracking-tight ${velocityTheme.textColorClass}`}>
               {metricMode === 'hours' ? `${kpis.totalLoggedHours}h` : `${kpis.completedStoryPoints} SP`}
             </span>
           </div>
           <div className="relative z-10">
             <Sparkline
-              data={[3, 7, 10, 16, 20, Math.max(4, kpis.completedStoryPoints)]}
-              color="#3b82f6"
+              data={velocitySparkline}
+              color={velocityTheme.colorHex}
             />
           </div>
           <p className="text-xs text-slate-400 mt-1 relative z-10">
@@ -245,22 +310,22 @@ export default function SprintView({
           </p>
         </div>
 
-        {/* Card 3: Defect Density (Red Top-Border & Glow) */}
-        <div className="relative overflow-hidden p-4 rounded-xl bg-slate-900/90 border border-slate-800 border-t-2 border-t-rose-500 hover:border-slate-700 transition-all flex flex-col justify-between group shadow-sm">
-          <div className="absolute top-0 left-0 w-24 h-24 bg-rose-500/25 rounded-full blur-xl pointer-events-none -translate-x-1/2 -translate-y-1/2" />
+        {/* Card 3: Defect Density (Conditional Red / Green) */}
+        <div className={`relative overflow-hidden p-4 rounded-xl bg-slate-900/90 border border-slate-800 border-t-2 ${defectTheme.topBorderClass} hover:border-slate-700 transition-all flex flex-col justify-between group shadow-sm`}>
+          <div className={`absolute top-0 left-0 w-24 h-24 ${defectTheme.glowBgClass} rounded-full blur-xl pointer-events-none -translate-x-1/2 -translate-y-1/2`} />
           <div className="flex items-center justify-between text-xs text-slate-400 font-semibold tracking-wider relative z-10">
             <span>DEFECT DENSITY</span>
-            <AlertTriangle className="w-4 h-4 text-rose-400" />
+            <AlertTriangle className={`w-4 h-4 ${defectTheme.iconColorClass}`} />
           </div>
           <div className="mt-2 mb-1 relative z-10">
-            <span className="text-4xl font-extrabold tracking-tight text-rose-400">
+            <span className={`text-4xl font-extrabold tracking-tight ${defectTheme.textColorClass}`}>
               {kpis.bugRatio}%
             </span>
           </div>
           <div className="relative z-10">
             <Sparkline
-              data={[0, 1, 1, 2, Math.max(1, kpis.bugCount)]}
-              color="#f43f5e"
+              data={defectSparkline}
+              color={defectTheme.colorHex}
             />
           </div>
           <p className="text-xs text-slate-400 mt-1 relative z-10">
@@ -268,22 +333,22 @@ export default function SprintView({
           </p>
         </div>
 
-        {/* Card 4: Estimation Health (Green Top-Border & Glow) */}
-        <div className="relative overflow-hidden p-4 rounded-xl bg-slate-900/90 border border-slate-800 border-t-2 border-t-emerald-500 hover:border-slate-700 transition-all flex flex-col justify-between group shadow-sm">
-          <div className="absolute top-0 left-0 w-24 h-24 bg-emerald-500/20 rounded-full blur-xl pointer-events-none -translate-x-1/2 -translate-y-1/2" />
+        {/* Card 4: Estimation Health (Green at 100%, Orange if unestimated) */}
+        <div className={`relative overflow-hidden p-4 rounded-xl bg-slate-900/90 border border-slate-800 border-t-2 ${estimationTheme.topBorderClass} hover:border-slate-700 transition-all flex flex-col justify-between group shadow-sm`}>
+          <div className={`absolute top-0 left-0 w-24 h-24 ${estimationTheme.glowBgClass} rounded-full blur-xl pointer-events-none -translate-x-1/2 -translate-y-1/2`} />
           <div className="flex items-center justify-between text-xs text-slate-400 font-semibold tracking-wider relative z-10">
             <span>ESTIMATION HEALTH</span>
-            <ShieldCheck className="w-4 h-4 text-emerald-400" />
+            <ShieldCheck className={`w-4 h-4 ${estimationTheme.iconColorClass}`} />
           </div>
           <div className="mt-2 mb-1 relative z-10">
-            <span className="text-4xl font-extrabold tracking-tight text-white">
+            <span className={`text-4xl font-extrabold tracking-tight ${estimationTheme.textColorClass}`}>
               {kpis.unestimatedPointsCount === 0 ? '100%' : `${kpis.unestimatedPointsCount}`}
             </span>
           </div>
           <div className="relative z-10">
             <Sparkline
-              data={[85, 90, 94, 98, 100]}
-              color="#10b981"
+              data={estimationSparkline}
+              color={estimationTheme.colorHex}
             />
           </div>
           <p className="text-xs text-slate-400 mt-1 relative z-10">
@@ -293,15 +358,15 @@ export default function SprintView({
           </p>
         </div>
 
-        {/* Card 5: Cycle Time */}
-        <div className="relative overflow-hidden p-4 rounded-xl bg-slate-900/90 border border-slate-800 border-t-2 border-t-purple-500 hover:border-slate-700 transition-all flex flex-col justify-between group shadow-sm">
-          <div className="absolute top-0 left-0 w-24 h-24 bg-purple-500/15 rounded-full blur-xl pointer-events-none -translate-x-1/2 -translate-y-1/2" />
+        {/* Card 5: Cycle Time (Dynamic Conditional Theme) */}
+        <div className={`relative overflow-hidden p-4 rounded-xl bg-slate-900/90 border border-slate-800 border-t-2 ${cycleTimeTheme.topBorderClass} hover:border-slate-700 transition-all flex flex-col justify-between group shadow-sm`}>
+          <div className={`absolute top-0 left-0 w-24 h-24 ${cycleTimeTheme.glowBgClass} rounded-full blur-xl pointer-events-none -translate-x-1/2 -translate-y-1/2`} />
           <div className="flex items-center justify-between text-xs text-slate-400 font-semibold tracking-wider relative z-10">
             <span>CYCLE TIME</span>
-            <Clock className="w-4 h-4 text-purple-400" />
+            <Clock className={`w-4 h-4 ${cycleTimeTheme.iconColorClass}`} />
           </div>
           <div className="mt-2 mb-1 relative z-10">
-            <span className="text-4xl font-extrabold tracking-tight text-white">
+            <span className={`text-4xl font-extrabold tracking-tight ${cycleTimeTheme.textColorClass}`}>
               {kpis.avgCycleTimeDays !== null && kpis.avgCycleTimeDays > 0
                 ? `${kpis.avgCycleTimeDays}d`
                 : 'N/A'}
@@ -309,8 +374,8 @@ export default function SprintView({
           </div>
           <div className="relative z-10">
             <Sparkline
-              data={[4.5, 4.0, 3.6, 3.1, Math.max(1, kpis.avgCycleTimeDays || 2.4)]}
-              color="#a855f7"
+              data={cycleTimeSparkline}
+              color={cycleTimeTheme.colorHex}
             />
           </div>
           <p className="text-xs text-slate-400 mt-1 relative z-10">

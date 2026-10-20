@@ -1021,6 +1021,8 @@ resolver.define('getProjectAnalytics', async (req) => {
         storyPoints: issuePoints,
         estimatedHours: Math.round((estSec / 3600) * 10) / 10,
         loggedHours: Math.round((spentSec / 3600) * 10) / 10,
+        created: issue.fields?.created,
+        resolutiondate: issue.fields?.resolutiondate,
         updated: issue.fields?.updated,
         daysInactive,
         isStale,

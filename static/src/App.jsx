@@ -538,6 +538,8 @@ export default function App() {
               isBehindSchedule={isBehindSchedule}
               isSlightlyBehind={isSlightlyBehind}
               lastRefreshed={lastRefreshed}
+              activeSprintStartDate={analytics?.activeSprintStartDate}
+              activeSprintEndDate={analytics?.activeSprintEndDate}
             />
           )}
 
