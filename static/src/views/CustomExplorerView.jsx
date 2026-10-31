@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { ResponsiveGridLayout, useContainerWidth } from 'react-grid-layout';
 import 'react-grid-layout/css/styles.css';
 import 'react-resizable/css/styles.css';
@@ -13,6 +13,7 @@ import {
   HelpCircle,
   Filter,
   X,
+  Layers,
 } from 'lucide-react';
 import ChartWidget from '../components/explorer/ChartWidget';
 import WidgetPropertiesSidebar from '../components/explorer/WidgetPropertiesSidebar';
@@ -99,6 +100,7 @@ export default function CustomExplorerView({
   const [selectedWidgetId, setSelectedWidgetId] = useState('widget-1');
   const [expandedWidgetId, setExpandedWidgetId] = useState(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [inspectorOpen, setInspectorOpen] = useState(false);
 
   // Global cross-filtering state from Zustand
   const {
@@ -115,6 +117,13 @@ export default function CustomExplorerView({
   } = useFilterStore();
 
   const isCrossFiltered = hasActiveFilters();
+
+  // Slide open the inspector drawer whenever user clicks a chart slice / cross-filter
+  useEffect(() => {
+    if (isCrossFiltered) {
+      setInspectorOpen(true);
+    }
+  }, [isCrossFiltered, selectedType, selectedStatus, selectedAssignee, selectedPriority]);
 
   // Compute cross-filtered issues dynamically across all active filters
   const crossFilteredIssues = useMemo(() => {
@@ -344,6 +353,19 @@ export default function CustomExplorerView({
               <Sliders className="w-3.5 h-3.5" />
               Properties
             </button>
+
+            <button
+              onClick={() => setInspectorOpen(!inspectorOpen)}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all ${
+                inspectorOpen
+                  ? 'bg-blue-600 text-white shadow-md shadow-blue-500/20 border-blue-500'
+                  : 'bg-slate-800 text-slate-300 hover:text-white border-slate-700/60'
+              }`}
+              title="Toggle Issue Drill-Down Drawer"
+            >
+              <Layers className="w-3.5 h-3.5 text-cyan-400" />
+              <span>Inspector ({isCrossFiltered ? crossFilteredIssues.length : allIssues.length})</span>
+            </button>
           </div>
         </div>
 
@@ -426,13 +448,24 @@ export default function CustomExplorerView({
                 </span>
               </div>
 
-              <button
-                type="button"
-                onClick={resetFilters}
-                className="px-3 py-1 rounded-xl bg-slate-800 hover:bg-slate-700 text-cyan-300 hover:text-cyan-200 font-bold text-xs border border-slate-700/80 transition-colors shadow-sm ml-auto"
-              >
-                Clear All Filters
-              </button>
+              <div className="flex items-center gap-2 ml-auto">
+                <button
+                  type="button"
+                  onClick={() => setInspectorOpen(true)}
+                  className="flex items-center gap-1.5 px-3 py-1 rounded-xl bg-gradient-to-r from-cyan-500/20 to-blue-500/20 hover:from-cyan-500/30 hover:to-blue-500/30 text-cyan-300 border border-cyan-500/40 text-xs font-bold transition-all shadow-sm active:scale-95"
+                >
+                  <Layers className="w-3.5 h-3.5" />
+                  <span>Inspect ({crossFilteredIssues.length})</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={resetFilters}
+                  className="px-3 py-1 rounded-xl bg-slate-800 hover:bg-slate-700 text-rose-400 hover:text-rose-300 font-bold text-xs border border-slate-700/80 transition-colors shadow-sm"
+                >
+                  Clear All Filters
+                </button>
+              </div>
             </div>
           )}
           {widgets.length === 0 ? (
@@ -501,16 +534,8 @@ export default function CustomExplorerView({
             </ResponsiveGridLayout>
           )}
 
-          {/* ── 3. DYNAMIC DRILL-DOWN INSPECTOR (MASTER-DETAIL PATTERN) ── */}
-          <div className="mt-6 pt-2 pb-8">
-            <DrillDownInspectorTable
-              issues={allIssues}
-              onUpdateIssue={onUpdateIssue}
-              projectKey={selectedProject?.key}
-              assigneesList={assigneesList}
-              statusesList={statusesList}
-            />
-          </div>
+          {/* Canvas bottom padding */}
+          <div className="h-6 shrink-0" />
         </div>
       </div>
 
@@ -552,6 +577,28 @@ export default function CustomExplorerView({
           projects={projects}
           selectedProject={selectedProject}
         />
+      )}
+
+      {/* ── SLIDE-UP BOTTOM DRAWER / MODAL: ISSUE INSPECTOR ── */}
+      {inspectorOpen && (
+        <div
+          className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex flex-col justify-end p-2 sm:p-4 animate-in fade-in duration-200"
+          onClick={() => setInspectorOpen(false)}
+        >
+          <div
+            className="w-full max-w-7xl max-h-[85vh] mx-auto bg-slate-950 border border-slate-800 rounded-3xl shadow-2xl flex flex-col overflow-hidden animate-in slide-in-from-bottom duration-200 ring-1 ring-cyan-500/20"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <DrillDownInspectorTable
+              issues={allIssues}
+              onUpdateIssue={onUpdateIssue}
+              projectKey={selectedProject?.key}
+              assigneesList={assigneesList}
+              statusesList={statusesList}
+              onClose={() => setInspectorOpen(false)}
+            />
+          </div>
+        </div>
       )}
     </div>
   );

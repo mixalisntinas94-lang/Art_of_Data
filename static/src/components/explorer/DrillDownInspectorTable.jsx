@@ -68,6 +68,7 @@ export default function DrillDownInspectorTable({
   projectKey,
   assigneesList = [],
   statusesList = ['To Do', 'In Progress', 'Done'],
+  onClose,
 }) {
   // Global cross-filtering state
   const {
@@ -783,6 +784,18 @@ export default function DrillDownInspectorTable({
               </>
             )}
           </button>
+
+          {/* Close Drawer Button */}
+          {onClose && (
+            <button
+              type="button"
+              onClick={onClose}
+              className="p-1 rounded-xl bg-slate-800 hover:bg-rose-500/20 text-slate-400 hover:text-rose-400 border border-slate-700 transition-colors"
+              title="Close Drawer"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          )}
         </div>
       </div>
 
