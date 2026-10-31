@@ -17,7 +17,9 @@ async function fetchJira(endpointRoute, options = {}) {
   try {
     const userRes = await api.asUser().requestJira(endpointRoute, options);
     if (userRes.ok) {
-      return await userRes.json();
+      if (userRes.status === 204) return { success: true };
+      const text = await userRes.text();
+      return text ? JSON.parse(text) : { success: true };
     }
   } catch (err) {
     // Fallback to asApp() if asUser() context is unavailable or unauthorized
@@ -28,7 +30,9 @@ async function fetchJira(endpointRoute, options = {}) {
     const errorText = await appRes.text();
     throw new Error(`Jira API error (${appRes.status}): ${errorText}`);
   }
-  return await appRes.json();
+  if (appRes.status === 204) return { success: true };
+  const text = await appRes.text();
+  return text ? JSON.parse(text) : { success: true };
 }
 
 /**
@@ -1111,6 +1115,88 @@ resolver.define('getProjectAnalytics', async (req) => {
       success: false,
       error: err.message || 'Failed to fetch project analytics',
     };
+  }
+});
+
+/**
+ * Resolver: updateIssueStatus
+ * Transitions an issue to a new status (e.g. In Progress, Done, To Do)
+ */
+resolver.define('updateIssueStatus', async (req) => {
+  const { issueKey, statusName } = req.payload || {};
+  if (!issueKey || !statusName) {
+    return { success: false, error: 'Issue key and statusName are required' };
+  }
+
+  try {
+    const transitionsData = await fetchJira(route`/rest/api/3/issue/${issueKey}/transitions`);
+    const transitions = transitionsData.transitions || [];
+
+    const targetLower = statusName.toLowerCase();
+    let matchedTransition = transitions.find(
+      (t) => (t.name || '').toLowerCase() === targetLower || (t.to?.name || '').toLowerCase() === targetLower
+    );
+
+    if (!matchedTransition) {
+      matchedTransition = transitions.find(
+        (t) =>
+          (t.name || '').toLowerCase().includes(targetLower) ||
+          (t.to?.name || '').toLowerCase().includes(targetLower)
+      );
+    }
+
+    if (!matchedTransition) {
+      return {
+        success: false,
+        error: `No transition found to "${statusName}". Available: ${transitions.map((t) => t.name).join(', ')}`,
+      };
+    }
+
+    await fetchJira(route`/rest/api/3/issue/${issueKey}/transitions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ transition: { id: matchedTransition.id } }),
+    });
+
+    return { success: true, issueKey, newStatus: matchedTransition.to?.name || statusName };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+/**
+ * Resolver: updateIssueAssignee
+ * Reassigns an issue to a given user
+ */
+resolver.define('updateIssueAssignee', async (req) => {
+  const { issueKey, assigneeName, accountId } = req.payload || {};
+  if (!issueKey) {
+    return { success: false, error: 'Issue key is required' };
+  }
+
+  try {
+    let targetAccountId = accountId;
+
+    if (!targetAccountId && assigneeName) {
+      if (assigneeName.toLowerCase() === 'unassigned') {
+        targetAccountId = null;
+      } else {
+        const users = await fetchJira(route`/rest/api/3/user/search?query=${encodeURIComponent(assigneeName)}`);
+        if (Array.isArray(users) && users.length > 0) {
+          targetAccountId = users[0].accountId;
+        }
+      }
+    }
+
+    await fetchJira(route`/rest/api/3/issue/${issueKey}/assignee`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ accountId: targetAccountId }),
+    });
+
+    return { success: true, issueKey, assignee: assigneeName };
+  } catch (err) {
+    return { success: false, error: err.message };
   }
 });
 

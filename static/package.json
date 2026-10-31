@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@forge/bridge": "^5.15.1",
+    "@tanstack/react-table": "^8.21.3",
     "clsx": "^2.1.1",
     "echarts": "^6.1.0",
     "echarts-for-react": "^3.0.6",

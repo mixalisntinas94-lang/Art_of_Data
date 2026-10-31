@@ -13,6 +13,9 @@ import {
   Trash2,
   Copy,
   Sparkles,
+  TableProperties,
+  Table,
+  ListTree,
 } from 'lucide-react';
 
 const CHART_TYPES = [
@@ -21,6 +24,7 @@ const CHART_TYPES = [
   { id: 'pie', label: 'Pie', icon: PieIcon, desc: 'Proportional share' },
   { id: 'donut', label: 'Donut', icon: CircleDot, desc: 'Ratio with center focus' },
   { id: 'number', label: 'Metric', icon: Hash, desc: 'Single KPI summary' },
+  { id: 'table', label: 'Pivot Table', icon: TableProperties, desc: '2D matrix cross-tabulation' },
 ];
 
 const GROUP_BY_OPTIONS = [
@@ -183,15 +187,53 @@ export default function WidgetPropertiesSidebar({
           </div>
         </div>
 
-        {/* ── 4. DIMENSIONS & MEASURES (X & Y AXIS) ── */}
+        {/* ── 4. DIMENSIONS & MEASURES (X & Y AXIS / ROWS & COLS) ── */}
         {selectedWidget.chartType !== 'number' && (
           <div className="space-y-3 p-3 rounded-xl bg-slate-950/60 border border-slate-800/80">
+            {selectedWidget.chartType === 'table' && (
+              <div className="space-y-1.5 pb-2 border-b border-slate-800/80">
+                <label className="font-semibold text-slate-300 text-[11px] uppercase tracking-wider flex items-center justify-between">
+                  <span>Pivot Display Mode</span>
+                  <span className="text-[10px] text-cyan-400 font-mono">Expandable</span>
+                </label>
+                <div className="grid grid-cols-2 gap-1.5 p-1 bg-slate-900 border border-slate-800 rounded-xl">
+                  <button
+                    type="button"
+                    onClick={() => handleChange('pivotMode', 'matrix')}
+                    className={`px-2 py-1.5 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all ${
+                      (selectedWidget.pivotMode || 'matrix') === 'matrix'
+                        ? 'bg-cyan-500 text-slate-950 font-bold shadow-sm'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    <Table className="w-3.5 h-3.5" />
+                    <span>2D Matrix</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => handleChange('pivotMode', 'tree')}
+                    className={`px-2 py-1.5 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all ${
+                      selectedWidget.pivotMode === 'tree'
+                        ? 'bg-cyan-500 text-slate-950 font-bold shadow-sm'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    <ListTree className="w-3.5 h-3.5" />
+                    <span>Nested Tree</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
             <div className="space-y-1">
               <label className="font-semibold text-slate-300 text-[11px] uppercase tracking-wider">
-                X-Axis / Group By (Dimension)
+                {selectedWidget.chartType === 'table'
+                  ? (selectedWidget.pivotMode === 'tree' ? 'Level 1: Primary Grouping' : 'Row Dimension (Rows)')
+                  : 'X-Axis / Group By (Dimension)'}
               </label>
               <select
-                value={selectedWidget.groupBy || 'type'}
+                value={selectedWidget.groupBy || (selectedWidget.chartType === 'table' ? 'assignee' : 'type')}
                 onChange={(e) => handleChange('groupBy', e.target.value)}
                 className="w-full bg-slate-900 border border-slate-800 focus:border-cyan-500 rounded-lg px-2.5 py-1.5 text-slate-200 focus:outline-none"
               >
@@ -203,12 +245,31 @@ export default function WidgetPropertiesSidebar({
               </select>
             </div>
 
+            {selectedWidget.chartType === 'table' && (
+              <div className="space-y-1">
+                <label className="font-semibold text-slate-300 text-[11px] uppercase tracking-wider">
+                  {selectedWidget.pivotMode === 'tree' ? 'Level 2: Secondary Grouping (Drill-Down)' : 'Column Dimension (Columns)'}
+                </label>
+                <select
+                  value={selectedWidget.pivotBy || 'status'}
+                  onChange={(e) => handleChange('pivotBy', e.target.value)}
+                  className="w-full bg-slate-900 border border-slate-800 focus:border-cyan-500 rounded-lg px-2.5 py-1.5 text-slate-200 focus:outline-none"
+                >
+                  {GROUP_BY_OPTIONS.filter((opt) => opt.id !== (selectedWidget.groupBy || 'assignee')).map((opt) => (
+                    <option key={opt.id} value={opt.id}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
             <div className="space-y-1">
               <label className="font-semibold text-slate-300 text-[11px] uppercase tracking-wider">
-                Y-Axis / Measure (Aggregation)
+                {selectedWidget.chartType === 'table' ? 'Cell Measure (Value)' : 'Y-Axis / Measure (Aggregation)'}
               </label>
               <select
-                value={selectedWidget.measure || 'count'}
+                value={selectedWidget.measure || (selectedWidget.chartType === 'table' ? 'storyPoints' : 'count')}
                 onChange={(e) => handleChange('measure', e.target.value)}
                 className="w-full bg-slate-900 border border-slate-800 focus:border-cyan-500 rounded-lg px-2.5 py-1.5 text-slate-200 focus:outline-none"
               >
@@ -252,25 +313,51 @@ export default function WidgetPropertiesSidebar({
             })}
           </div>
 
-          <div className="pt-2 flex items-center justify-between border-t border-slate-800/80">
-            <span className="text-slate-300 font-medium">Show Data Labels</span>
-            <input
-              type="checkbox"
-              checked={selectedWidget.showLabels ?? true}
-              onChange={(e) => handleChange('showLabels', e.target.checked)}
-              className="accent-cyan-500 w-4 h-4 rounded cursor-pointer"
-            />
-          </div>
+          {selectedWidget.chartType === 'table' ? (
+            <>
+              <div className="pt-2 flex items-center justify-between border-t border-slate-800/80">
+                <span className="text-slate-300 font-medium">Heatmap Cell Tinting</span>
+                <input
+                  type="checkbox"
+                  checked={selectedWidget.heatmap ?? true}
+                  onChange={(e) => handleChange('heatmap', e.target.checked)}
+                  className="accent-cyan-500 w-4 h-4 rounded cursor-pointer"
+                />
+              </div>
 
-          <div className="flex items-center justify-between">
-            <span className="text-slate-300 font-medium">Show Legend</span>
-            <input
-              type="checkbox"
-              checked={selectedWidget.showLegend ?? true}
-              onChange={(e) => handleChange('showLegend', e.target.checked)}
-              className="accent-cyan-500 w-4 h-4 rounded cursor-pointer"
-            />
-          </div>
+              <div className="flex items-center justify-between">
+                <span className="text-slate-300 font-medium">Show Totals (Rows & Cols)</span>
+                <input
+                  type="checkbox"
+                  checked={selectedWidget.showTotals ?? true}
+                  onChange={(e) => handleChange('showTotals', e.target.checked)}
+                  className="accent-cyan-500 w-4 h-4 rounded cursor-pointer"
+                />
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="pt-2 flex items-center justify-between border-t border-slate-800/80">
+                <span className="text-slate-300 font-medium">Show Data Labels</span>
+                <input
+                  type="checkbox"
+                  checked={selectedWidget.showLabels ?? true}
+                  onChange={(e) => handleChange('showLabels', e.target.checked)}
+                  className="accent-cyan-500 w-4 h-4 rounded cursor-pointer"
+                />
+              </div>
+
+              <div className="flex items-center justify-between">
+                <span className="text-slate-300 font-medium">Show Legend</span>
+                <input
+                  type="checkbox"
+                  checked={selectedWidget.showLegend ?? true}
+                  onChange={(e) => handleChange('showLegend', e.target.checked)}
+                  className="accent-cyan-500 w-4 h-4 rounded cursor-pointer"
+                />
+              </div>
+            </>
+          )}
         </div>
       </div>
 

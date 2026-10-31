@@ -9,12 +9,16 @@ import {
   Sliders,
   Sparkles,
   BarChart3,
-  Layers,
   ChevronRight,
   HelpCircle,
+  Filter,
+  X,
 } from 'lucide-react';
 import ChartWidget from '../components/explorer/ChartWidget';
 import WidgetPropertiesSidebar from '../components/explorer/WidgetPropertiesSidebar';
+import DrillDownInspectorTable from '../components/explorer/DrillDownInspectorTable';
+import ErrorBoundary from '../components/ErrorBoundary';
+import { useFilterStore } from '../store/useFilterStore';
 
 // Default Starter BI Widgets
 const DEFAULT_WIDGETS = [
@@ -58,14 +62,26 @@ const DEFAULT_WIDGETS = [
     showLabels: false,
     showLegend: false,
   },
+  {
+    id: 'widget-5',
+    title: 'Workload Cross-Tabulation Matrix',
+    chartType: 'table',
+    groupBy: 'assignee',
+    pivotBy: 'status',
+    measure: 'storyPoints',
+    theme: 'cyber',
+    heatmap: true,
+    showTotals: true,
+  },
 ];
 
 const DEFAULT_LAYOUTS = {
   lg: [
-    { i: 'widget-1', x: 0, y: 0, w: 6, h: 4, minW: 3, minH: 3 },
-    { i: 'widget-2', x: 6, y: 0, w: 6, h: 4, minW: 3, minH: 3 },
-    { i: 'widget-3', x: 0, y: 4, w: 8, h: 4, minW: 3, minH: 3 },
-    { i: 'widget-4', x: 8, y: 4, w: 4, h: 4, minW: 3, minH: 2 },
+    { i: 'widget-1', x: 0, y: 0, w: 6, h: 4, minW: 4, minH: 3 },
+    { i: 'widget-2', x: 6, y: 0, w: 6, h: 4, minW: 4, minH: 3 },
+    { i: 'widget-3', x: 0, y: 4, w: 6, h: 4, minW: 4, minH: 3 },
+    { i: 'widget-4', x: 6, y: 4, w: 6, h: 4, minW: 3, minH: 2 },
+    { i: 'widget-5', x: 0, y: 8, w: 12, h: 5, minW: 6, minH: 4 },
   ],
 };
 
@@ -73,17 +89,67 @@ export default function CustomExplorerView({
   allIssues = [],
   projects = [],
   selectedProject,
+  onUpdateIssue,
+  assigneesList = [],
+  statusesList = ['To Do', 'In Progress', 'Done'],
 }) {
   const { width, containerRef } = useContainerWidth({ initialWidth: 1200 });
   const [widgets, setWidgets] = useState(DEFAULT_WIDGETS);
   const [layouts, setLayouts] = useState(DEFAULT_LAYOUTS);
   const [selectedWidgetId, setSelectedWidgetId] = useState('widget-1');
+  const [expandedWidgetId, setExpandedWidgetId] = useState(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
 
-  // Layout change callback
+  // Global cross-filtering state from Zustand
+  const {
+    selectedType,
+    selectedStatus,
+    selectedAssignee,
+    selectedPriority,
+    setSelectedType,
+    setSelectedStatus,
+    setSelectedAssignee,
+    setSelectedPriority,
+    resetFilters,
+    hasActiveFilters,
+  } = useFilterStore();
+
+  const isCrossFiltered = hasActiveFilters();
+
+  // Compute cross-filtered issues dynamically across all active filters
+  const crossFilteredIssues = useMemo(() => {
+    return allIssues.filter((issue) => {
+      if (selectedType && issue.type !== selectedType) return false;
+      if (selectedAssignee && issue.assignee !== selectedAssignee) return false;
+      if (selectedPriority && (issue.priority || 'Medium') !== selectedPriority) return false;
+      if (selectedStatus) {
+        const cat = issue.statusCategory;
+        const sName = (issue.status || '').toLowerCase();
+        if (selectedStatus === 'Done' && cat !== 'done' && !sName.includes('done')) return false;
+        if (selectedStatus === 'In Progress' && cat !== 'indeterminate' && !sName.includes('progress')) return false;
+        if (selectedStatus === 'To Do' && cat !== 'new' && cat !== 'undefined' && !sName.includes('to do')) return false;
+      }
+      return true;
+    });
+  }, [allIssues, selectedType, selectedAssignee, selectedStatus, selectedPriority]);
+
+  // Layout change callback - preserves min boundaries across resizes
   const handleLayoutChange = useCallback((currentLayout, allLayouts) => {
-    setLayouts(allLayouts);
-  }, []);
+    const sanitized = {};
+    Object.keys(allLayouts).forEach((bp) => {
+      sanitized[bp] = (allLayouts[bp] || []).map((item) => {
+        const wMatch = widgets.find((w) => w.id === item.i);
+        const isTable = wMatch?.chartType === 'table';
+        const isNum = wMatch?.chartType === 'number';
+        return {
+          ...item,
+          minW: item.minW || (isTable ? 6 : isNum ? 3 : 4),
+          minH: item.minH || (isTable ? 4 : isNum ? 2 : 3),
+        };
+      });
+    });
+    setLayouts(sanitized);
+  }, [widgets]);
 
   // Selected widget object
   const selectedWidget = useMemo(
@@ -91,18 +157,30 @@ export default function CustomExplorerView({
     [widgets, selectedWidgetId]
   );
 
+  // Expanded widget object for fullscreen focus view
+  const expandedWidget = useMemo(
+    () => widgets.find((w) => w.id === expandedWidgetId),
+    [widgets, expandedWidgetId]
+  );
+
   // Add new widget
   const handleAddWidget = (presetType = 'bar') => {
+    const isTable = presetType === 'table';
     const newId = `widget-${Date.now()}`;
     const newWidget = {
       id: newId,
-      title: `Custom Report #${widgets.length + 1}`,
+      title: isTable
+        ? `Pivot Matrix #${widgets.length + 1}`
+        : `Custom Report #${widgets.length + 1}`,
       chartType: presetType,
-      groupBy: 'type',
-      measure: 'count',
+      groupBy: isTable ? 'assignee' : 'type',
+      pivotBy: isTable ? 'status' : undefined,
+      measure: isTable ? 'storyPoints' : 'count',
       theme: 'cyber',
       showLabels: true,
       showLegend: true,
+      heatmap: true,
+      showTotals: true,
     };
 
     setWidgets((prev) => [...prev, newWidget]);
@@ -110,12 +188,12 @@ export default function CustomExplorerView({
     // Position new widget in next available spot
     const newLayoutItem = {
       i: newId,
-      x: (widgets.length * 4) % 12,
+      x: isTable ? 0 : (widgets.length * 4) % 12,
       y: Infinity, // place at the bottom
-      w: 6,
-      h: 4,
-      minW: 3,
-      minH: 3,
+      w: isTable ? 12 : 6,
+      h: isTable ? 5 : 4,
+      minW: isTable ? 6 : 4,
+      minH: isTable ? 4 : 3,
     };
 
     setLayouts((prev) => ({
@@ -132,6 +210,28 @@ export default function CustomExplorerView({
     setWidgets((prev) =>
       prev.map((w) => (w.id === id ? { ...w, ...updates } : w))
     );
+
+    // If widget was upgraded to table/pivot, guarantee sufficient canvas space
+    if (updates.chartType === 'table') {
+      setLayouts((prev) => {
+        const updated = { ...prev };
+        Object.keys(updated).forEach((bp) => {
+          updated[bp] = (updated[bp] || []).map((l) => {
+            if (l.i === id) {
+              return {
+                ...l,
+                w: Math.max(l.w || 6, 8),
+                h: Math.max(l.h || 4, 5),
+                minW: 6,
+                minH: 4,
+              };
+            }
+            return l;
+          });
+        });
+        return updated;
+      });
+    }
   };
 
   // Duplicate widget
@@ -247,11 +347,94 @@ export default function CustomExplorerView({
           </div>
         </div>
 
-        {/* ── CANVAS WORKSPACE WITH DOT GRID BACKGROUND ── */}
+        {/* ── CANVAS WORKSPACE WITH DOT GRID BACKGROUND (2D SCROLL SUPPORT) ── */}
         <div
           ref={containerRef}
-          className="flex-1 p-4 overflow-y-auto bg-[#070b14] bg-[radial-gradient(#1e293b_1px,transparent_1px)] [background-size:18px_18px] relative min-h-[500px]"
+          className="flex-1 p-4 overflow-auto custom-scrollbar bg-[#070b14] bg-[radial-gradient(#1e293b_1px,transparent_1px)] [background-size:18px_18px] relative min-h-[500px] min-w-0 flex flex-col gap-3"
         >
+          {/* ── ACTIVE CROSS-FILTER BAR ── */}
+          {isCrossFiltered && (
+            <div className="p-3 rounded-2xl bg-slate-900/90 border border-cyan-500/40 shadow-lg shadow-cyan-500/10 flex items-center justify-between gap-3 text-xs flex-wrap animate-in fade-in slide-in-from-top-2 duration-200">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-cyan-400 font-extrabold uppercase tracking-wider text-[11px] flex items-center gap-1.5">
+                  <Filter className="w-3.5 h-3.5 animate-pulse" />
+                  Active Cross-Filters:
+                </span>
+
+                {selectedType && (
+                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-slate-950 border border-slate-800 text-slate-200 shadow-sm">
+                    <span className="text-slate-400 text-[10px] uppercase font-semibold">Type:</span>
+                    <strong className="text-purple-300 font-bold">{selectedType}</strong>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedType(null)}
+                      className="p-0.5 rounded hover:bg-rose-500/20 hover:text-rose-400 text-slate-400 ml-0.5 transition-colors"
+                      title="Clear type filter"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </span>
+                )}
+
+                {selectedStatus && (
+                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-slate-950 border border-slate-800 text-slate-200 shadow-sm">
+                    <span className="text-slate-400 text-[10px] uppercase font-semibold">Status:</span>
+                    <strong className="text-blue-300 font-bold">{selectedStatus}</strong>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedStatus(null)}
+                      className="p-0.5 rounded hover:bg-rose-500/20 hover:text-rose-400 text-slate-400 ml-0.5 transition-colors"
+                      title="Clear status filter"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </span>
+                )}
+
+                {selectedAssignee && (
+                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-slate-950 border border-slate-800 text-slate-200 shadow-sm">
+                    <span className="text-slate-400 text-[10px] uppercase font-semibold">Assignee:</span>
+                    <strong className="text-cyan-300 font-bold">{selectedAssignee}</strong>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedAssignee(null)}
+                      className="p-0.5 rounded hover:bg-rose-500/20 hover:text-rose-400 text-slate-400 ml-0.5 transition-colors"
+                      title="Clear assignee filter"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </span>
+                )}
+
+                {selectedPriority && (
+                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-slate-950 border border-slate-800 text-slate-200 shadow-sm">
+                    <span className="text-slate-400 text-[10px] uppercase font-semibold">Priority:</span>
+                    <strong className="text-amber-300 font-bold">{selectedPriority}</strong>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedPriority(null)}
+                      className="p-0.5 rounded hover:bg-rose-500/20 hover:text-rose-400 text-slate-400 ml-0.5 transition-colors"
+                      title="Clear priority filter"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </span>
+                )}
+
+                <span className="text-slate-400 font-mono text-[11px] ml-1">
+                  ({crossFilteredIssues.length} of {allIssues.length} issues match)
+                </span>
+              </div>
+
+              <button
+                type="button"
+                onClick={resetFilters}
+                className="px-3 py-1 rounded-xl bg-slate-800 hover:bg-slate-700 text-cyan-300 hover:text-cyan-200 font-bold text-xs border border-slate-700/80 transition-colors shadow-sm ml-auto"
+              >
+                Clear All Filters
+              </button>
+            </div>
+          )}
           {widgets.length === 0 ? (
             <div className="h-full flex flex-col items-center justify-center text-center p-8 border-2 border-dashed border-slate-800 rounded-2xl max-w-lg mx-auto my-12 bg-slate-900/40">
               <div className="w-16 h-16 rounded-2xl bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-center text-cyan-400 mb-4 shadow-lg shadow-cyan-500/20">
@@ -295,23 +478,68 @@ export default function CustomExplorerView({
             >
               {widgets.map((widget) => (
                 <div key={widget.id} className="relative">
-                  <ChartWidget
-                    widget={widget}
-                    issues={allIssues}
-                    isSelected={selectedWidgetId === widget.id}
-                    onSelect={(id) => {
-                      setSelectedWidgetId(id);
-                      setSidebarOpen(true);
-                    }}
-                    onDuplicate={handleDuplicateWidget}
-                    onDelete={handleDeleteWidget}
-                  />
+                  <ErrorBoundary
+                    title={widget.title || 'Widget Error'}
+                    onReset={() => handleUpdateWidget(widget.id, { chartType: 'bar' })}
+                  >
+                    <ChartWidget
+                      widget={widget}
+                      issues={crossFilteredIssues}
+                      isSelected={selectedWidgetId === widget.id}
+                      onSelect={(id) => {
+                        setSelectedWidgetId(id);
+                        setSidebarOpen(true);
+                      }}
+                      onDuplicate={handleDuplicateWidget}
+                      onDelete={handleDeleteWidget}
+                      onMaximize={(id) => setExpandedWidgetId(expandedWidgetId === id ? null : id)}
+                      isMaximized={expandedWidgetId === widget.id}
+                    />
+                  </ErrorBoundary>
                 </div>
               ))}
             </ResponsiveGridLayout>
           )}
+
+          {/* ── 3. DYNAMIC DRILL-DOWN INSPECTOR (MASTER-DETAIL PATTERN) ── */}
+          <div className="mt-6 pt-2 pb-8">
+            <DrillDownInspectorTable
+              issues={allIssues}
+              onUpdateIssue={onUpdateIssue}
+              projectKey={selectedProject?.key}
+              assigneesList={assigneesList}
+              statusesList={statusesList}
+            />
+          </div>
         </div>
       </div>
+
+      {/* ── EXPANDED / FULLSCREEN FOCUS VIEW OVERLAY ── */}
+      {expandedWidget && (
+        <div
+          className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4 sm:p-8 animate-in fade-in duration-200"
+          onClick={() => setExpandedWidgetId(null)}
+        >
+          <div
+            className="w-full max-w-6xl h-[88vh] bg-slate-900 border border-slate-700 rounded-3xl shadow-2xl flex flex-col overflow-hidden animate-in zoom-in-95 duration-200"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <ChartWidget
+              widget={expandedWidget}
+              issues={crossFilteredIssues}
+              isSelected={false}
+              onSelect={() => {}}
+              onDuplicate={handleDuplicateWidget}
+              onDelete={() => {
+                handleDeleteWidget(expandedWidget.id);
+                setExpandedWidgetId(null);
+              }}
+              onMaximize={() => setExpandedWidgetId(null)}
+              isMaximized={true}
+            />
+          </div>
+        </div>
+      )}
 
       {/* ── RIGHT SLIDE-OUT / FIXED SIDEBAR: WIDGET PROPERTIES ── */}
       {sidebarOpen && (

@@ -28,6 +28,89 @@ import {
   ReferenceLine,
 } from 'recharts';
 import { getKpiTheme, computeLiveSparkline } from '../utils/kpiTheme';
+import {
+  getSemanticColor,
+  getSemanticIcon,
+  getInitialsAvatar,
+  JIRA_ICONS,
+} from '../utils/colorDictionary';
+
+/**
+ * Custom Recharts Tick Component for Issue Types with Atlassian Icon
+ */
+function TypeXAxisTick({ x, y, payload, onSelect, isSelected }) {
+  const typeName = payload?.value || '';
+  const icon = getSemanticIcon('type', typeName);
+  const active = isSelected === typeName;
+  const displayName = typeName.length > 9 ? `${typeName.slice(0, 8)}…` : typeName;
+
+  return (
+    <g
+      transform={`translate(${x},${y})`}
+      className="cursor-pointer select-none"
+      onClick={() => onSelect && onSelect(typeName)}
+    >
+      {icon && (
+        <image
+          href={icon}
+          x={-24}
+          y={4}
+          width={14}
+          height={14}
+        />
+      )}
+      <text
+        x={icon ? -6 : 0}
+        y={15}
+        textAnchor={icon ? 'start' : 'middle'}
+        fill={active ? '#c084fc' : '#94a3b8'}
+        fontSize={11}
+        fontWeight={active ? 700 : 500}
+      >
+        {displayName}
+      </text>
+    </g>
+  );
+}
+
+/**
+ * Custom Recharts Tick Component for Assignees with Real Jira Avatar
+ */
+function AssigneeYAxisTick({ x, y, payload, onSelect, isSelected, avatarMap }) {
+  const name = payload?.value || '';
+  const avatar = avatarMap?.[name] || getInitialsAvatar(name);
+  const active = isSelected === name;
+  const displayName = name.length > 13 ? `${name.slice(0, 11)}…` : name;
+
+  return (
+    <g
+      transform={`translate(${x},${y})`}
+      className="cursor-pointer select-none"
+      onClick={() => onSelect && onSelect(name)}
+    >
+      {avatar && (
+        <image
+          href={avatar}
+          x={-120}
+          y={-8}
+          width={16}
+          height={16}
+          style={{ clipPath: 'circle(8px at 8px 8px)' }}
+        />
+      )}
+      <text
+        x={-100}
+        y={4}
+        textAnchor="start"
+        fill={active ? '#38bdf8' : '#cbd5e1'}
+        fontSize={11}
+        fontWeight={active ? 700 : 500}
+      >
+        {displayName}
+      </text>
+    </g>
+  );
+}
 
 /**
  * Lightweight SVG Sparkline component
@@ -156,6 +239,17 @@ export default function SprintView({
     startDate: activeSprintStartDate || analytics?.activeSprintStartDate,
     endDate: activeSprintEndDate || analytics?.activeSprintEndDate,
   }), [activeSprintStartDate, activeSprintEndDate, analytics?.activeSprintStartDate, analytics?.activeSprintEndDate]);
+
+  // Extract avatar URLs map for all assignees
+  const assigneeAvatarMap = useMemo(() => {
+    const map = {};
+    (analytics?.rawIssues || []).forEach((issue) => {
+      if (issue.assignee && issue.avatarUrl) {
+        map[issue.assignee] = issue.avatarUrl;
+      }
+    });
+    return map;
+  }, [analytics?.rawIssues]);
 
   const completionSparkline = useMemo(
     () => computeLiveSparkline(filteredIssues, 'completion', sprintMeta),
@@ -602,9 +696,16 @@ export default function SprintView({
                   <XAxis
                     dataKey="name"
                     stroke="#64748b"
-                    fontSize={11}
                     tickLine={false}
                     axisLine={{ stroke: '#334155' }}
+                    interval={0}
+                    tick={(props) => (
+                      <TypeXAxisTick
+                        {...props}
+                        onSelect={setSelectedType}
+                        isSelected={selectedType}
+                      />
+                    )}
                   />
                   <YAxis
                     stroke="#64748b"
@@ -622,25 +723,24 @@ export default function SprintView({
                     }}
                   />
 
-                  {/* Bar with 30% Dimming on non-selected elements */}
+                  {/* Semantic Color Bar with Dimming on non-selected elements */}
                   <Bar
                     dataKey="points"
                     name="Story Points"
-                    fill="url(#purpleBlueGradient)"
-                    filter="url(#barGlow)"
                     maxBarSize={32}
                     radius={[6, 6, 0, 0]}
                   >
                     {typeChartData.map((entry, index) => {
+                      const sem = getSemanticColor('type', entry.name);
                       const isSelected = selectedType === entry.name;
                       const isDimmed = selectedType && !isSelected;
                       return (
                         <Cell
                           key={`cell-type-${index}`}
-                          fill="url(#purpleBlueGradient)"
-                          opacity={isDimmed ? 0.3 : 1}
-                          stroke={isSelected ? '#c084fc' : 'none'}
-                          strokeWidth={isSelected ? 2 : 0}
+                          fill={sem.color}
+                          opacity={isDimmed ? 0.25 : 1}
+                          stroke={isSelected ? '#ffffff' : sem.border || 'none'}
+                          strokeWidth={isSelected ? 2.5 : 0}
                           className="cursor-pointer transition-all duration-300"
                           onClick={() => setSelectedType(entry.name)}
                         />
@@ -659,7 +759,7 @@ export default function SprintView({
               </ResponsiveContainer>
             </div>
 
-            {/* Right (5 cols): Category Insights Side Panel with Clickable Types */}
+            {/* Right (5 cols): Category Insights Side Panel with Clickable Types & Icons */}
             <div className="md:col-span-5 bg-slate-800/40 border border-slate-800/80 rounded-xl p-3.5 flex flex-col justify-between space-y-3">
               <div className="flex items-center justify-between pb-2 border-b border-slate-800/80">
                 <span className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
@@ -678,7 +778,15 @@ export default function SprintView({
                 </div>
                 <div className="text-sm font-bold text-white mt-0.5 flex items-center justify-between">
                   <span className="flex items-center gap-1.5">
-                    <Flame className="w-3.5 h-3.5 text-amber-400" />
+                    {typeChartData[0] && getSemanticIcon('type', typeChartData[0].name) ? (
+                      <img
+                        src={getSemanticIcon('type', typeChartData[0].name)}
+                        alt=""
+                        className="w-4 h-4 shrink-0 object-contain"
+                      />
+                    ) : (
+                      <Flame className="w-3.5 h-3.5 text-amber-400" />
+                    )}
                     {typeChartData[0]?.name || 'Standard Tasks'}
                   </span>
                   <span className="text-indigo-400 font-mono">
@@ -687,7 +795,7 @@ export default function SprintView({
                 </div>
               </div>
 
-              {/* Detailed Category Stats List with Click Filter */}
+              {/* Detailed Category Stats List with Jira Type Icons & Click Filter */}
               <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
                 {typeChartData.map((cat, idx) => {
                   const pct =
@@ -696,6 +804,8 @@ export default function SprintView({
                       : 0;
                   const isSelected = selectedType === cat.name;
                   const isDimmed = selectedType && !isSelected;
+                  const catIcon = getSemanticIcon('type', cat.name);
+                  const sem = getSemanticColor('type', cat.name);
 
                   return (
                     <div
@@ -709,12 +819,22 @@ export default function SprintView({
                           : 'bg-slate-900/40 border-slate-800/50 hover:bg-slate-800/60'
                       }`}
                     >
-                      <span className="text-slate-300 font-medium truncate max-w-[90px]">
-                        {cat.name}
+                      <span className="text-slate-300 font-medium truncate max-w-[100px] flex items-center gap-1.5">
+                        {catIcon && (
+                          <img
+                            src={catIcon}
+                            alt=""
+                            className="w-3.5 h-3.5 shrink-0 object-contain"
+                          />
+                        )}
+                        <span>{cat.name}</span>
                       </span>
                       <div className="flex items-center gap-2">
                         <span className="text-slate-400 font-mono text-[11px]">{cat.count} tkts</span>
-                        <span className="text-white font-bold font-mono text-[11px] w-12 text-right">
+                        <span
+                          style={{ color: sem.color }}
+                          className="font-bold font-mono text-[11px] w-12 text-right"
+                        >
                           {cat.points} SP
                         </span>
                         <span className="text-indigo-400 font-bold text-[10px] w-8 text-right">
@@ -799,10 +919,18 @@ export default function SprintView({
                   type="category"
                   dataKey="name"
                   stroke="#94a3b8"
-                  fontSize={11}
                   tickLine={false}
                   axisLine={{ stroke: '#334155' }}
-                  width={105}
+                  width={130}
+                  interval={0}
+                  tick={(props) => (
+                    <AssigneeYAxisTick
+                      {...props}
+                      onSelect={setSelectedAssignee}
+                      isSelected={selectedAssignee}
+                      avatarMap={assigneeAvatarMap}
+                    />
+                  )}
                 />
                 <Tooltip
                   contentStyle={{
@@ -995,8 +1123,23 @@ export default function SprintView({
                           </span>
                         </div>
                         <div className="flex items-center gap-1.5 text-[11px] text-slate-400 truncate">
+                          {getSemanticIcon('type', issue.type) && (
+                            <img
+                              src={getSemanticIcon('type', issue.type)}
+                              alt=""
+                              className="w-3 h-3 shrink-0 object-contain"
+                            />
+                          )}
                           <span>{issue.type}</span>
                           <span>·</span>
+                          {getSemanticIcon('priority', issue.priority) && (
+                            <img
+                              src={getSemanticIcon('priority', issue.priority)}
+                              alt=""
+                              className="w-3 h-3 shrink-0 object-contain"
+                              title={issue.priority}
+                            />
+                          )}
                           <span className="truncate">{issue.assignee || 'Unassigned'}</span>
                           {issue.storyPoints > 0 && (
                             <>

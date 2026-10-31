@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { invoke, view } from '@forge/bridge';
 import {
   AlertTriangle,
@@ -13,6 +13,7 @@ import SprintView from './views/SprintView';
 import CustomExplorerView from './views/CustomExplorerView';
 import ProjectReleaseView from './views/ProjectReleaseView';
 import PortfolioCompanyView from './views/PortfolioCompanyView';
+import ErrorBoundary from './components/ErrorBoundary';
 
 /**
  * Agile Pulse Analytics - Enterprise Custom UI Root Application
@@ -39,10 +40,12 @@ export default function App() {
     selectedType,
     selectedAssignee,
     selectedStatus,
+    selectedPriority,
     activityFilter,
     setSelectedType,
     setSelectedAssignee,
     setSelectedStatus,
+    setSelectedPriority,
     setActivityFilter,
     resetFilters,
     hasActiveFilters,
@@ -105,7 +108,21 @@ export default function App() {
     }
   };
 
-  const allIssues = analytics?.rawIssues || [];
+  const [liveIssues, setLiveIssues] = useState([]);
+
+  useEffect(() => {
+    if (analytics?.rawIssues) {
+      setLiveIssues(analytics.rawIssues);
+    }
+  }, [analytics?.rawIssues]);
+
+  const allIssues = liveIssues.length > 0 ? liveIssues : (analytics?.rawIssues || []);
+
+  const handleUpdateIssue = useCallback((issueId, updates) => {
+    setLiveIssues((prev) =>
+      prev.map((i) => (i.id === issueId || i.key === issueId ? { ...i, ...updates } : i))
+    );
+  }, []);
 
   // Filter raw issues according to active cross-filters
   const filteredIssues = useMemo(() => {
@@ -116,6 +133,9 @@ export default function App() {
       if (selectedAssignee && issue.assignee !== selectedAssignee) {
         return false;
       }
+      if (selectedPriority && (issue.priority || 'Medium') !== selectedPriority) {
+        return false;
+      }
       if (selectedStatus) {
         const cat = issue.statusCategory;
         if (selectedStatus === 'Done' && cat !== 'done') return false;
@@ -124,7 +144,7 @@ export default function App() {
       }
       return true;
     });
-  }, [allIssues, selectedType, selectedAssignee, selectedStatus]);
+  }, [allIssues, selectedType, selectedAssignee, selectedStatus, selectedPriority]);
 
   // Derived real-time KPI metrics
   const kpis = useMemo(() => {
@@ -547,11 +567,14 @@ export default function App() {
           )}
 
           {currentScope === 'explorer' && (
-            <CustomExplorerView
-              allIssues={allIssues}
-              projects={projects}
-              selectedProject={selectedProject}
-            />
+            <ErrorBoundary title="Self-Service Analytics Engine Error">
+              <CustomExplorerView
+                allIssues={allIssues}
+                projects={projects}
+                selectedProject={selectedProject}
+                onUpdateIssue={handleUpdateIssue}
+              />
+            </ErrorBoundary>
           )}
 
           {currentScope === 'project' && (
