@@ -94,6 +94,7 @@ export default function DrillDownInspectorTable({
   const [pagination, setPagination] = useState({ pageIndex: 0, pageSize: 10 });
   const [activeDropdown, setActiveDropdown] = useState(null); // { type: 'status' | 'assignee', issueKey }
   const [actionSuccess, setActionSuccess] = useState({}); // { [issueKey]: message }
+  const [actionError, setActionError] = useState({}); // { [issueKey]: errorMessage }
 
   // Auto-expand whenever user clicks on an ECharts slice / cross-filter
   useEffect(() => {
@@ -112,16 +113,30 @@ export default function DrillDownInspectorTable({
     return Array.from(names);
   }, [assigneesList, issues]);
 
-  // Map assignees to avatar URLs
-  const assigneeAvatarMap = useMemo(() => {
-    const map = {};
+  // Map assignees to avatar URLs and accountIds
+  const { assigneeAvatarMap, assigneeAccountIdMap } = useMemo(() => {
+    const avatars = {};
+    const accountIds = {};
     issues.forEach((i) => {
       if (i.assignee && i.avatarUrl) {
-        map[i.assignee] = i.avatarUrl;
+        avatars[i.assignee] = i.avatarUrl;
+      }
+      if (i.assignee && i.accountId) {
+        accountIds[i.assignee] = i.accountId;
       }
     });
-    return map;
+    return { assigneeAvatarMap: avatars, assigneeAccountIdMap: accountIds };
   }, [issues]);
+
+  // Shared helper for Radar Risk evaluation (supports English & Greek bug types)
+  const isRadarCandidate = (issue) => {
+    const isStale = issue.isStale || (issue.daysInactive !== undefined && issue.daysInactive >= 3);
+    const p = (issue.priority || '').toLowerCase();
+    const isHighRiskPriority = p === 'highest' || p === 'high';
+    const isBug = Boolean(issue.isBug) || /\b(bug|defect|incident|σφάλμα|λάθος)\b/i.test(issue.type || '');
+    const notDone = issue.statusCategory !== 'done';
+    return isStale || (isHighRiskPriority && notDone) || (isBug && notDone);
+  };
 
   // ── 1. COMPUTE DISPLAY ISSUES (Cross-Filtered vs Radar vs All) ──
   const displayIssues = useMemo(() => {
@@ -130,7 +145,7 @@ export default function DrillDownInspectorTable({
       return issues.filter((issue) => {
         if (selectedType && issue.type !== selectedType) return false;
         if (selectedAssignee && issue.assignee !== selectedAssignee) return false;
-        if (selectedPriority && (issue.priority || 'Medium') !== selectedPriority) return false;
+        if (selectedPriority && (issue.priority || 'Unprioritized') !== selectedPriority) return false;
         if (selectedStatus) {
           const cat = issue.statusCategory;
           const sName = (issue.status || '').toLowerCase();
@@ -144,14 +159,7 @@ export default function DrillDownInspectorTable({
 
     // Default Idle State: RADAR Mode (Blockers, Stale, High Risk)
     if (idleMode === 'radar') {
-      return issues.filter((issue) => {
-        const isStale = issue.isStale || (issue.daysInactive !== undefined && issue.daysInactive >= 3);
-        const p = (issue.priority || '').toLowerCase();
-        const isHighRiskPriority = p === 'highest' || p === 'high';
-        const isBug = (issue.type || '').toLowerCase().includes('bug');
-        const notDone = issue.statusCategory !== 'done';
-        return isStale || (isHighRiskPriority && notDone) || (isBug && notDone);
-      });
+      return issues.filter(isRadarCandidate);
     }
 
     // Default Idle State: All issues
@@ -160,31 +168,39 @@ export default function DrillDownInspectorTable({
 
   // Radar count for badge
   const radarTotalCount = useMemo(() => {
-    return issues.filter((issue) => {
-      const isStale = issue.isStale || (issue.daysInactive !== undefined && issue.daysInactive >= 3);
-      const p = (issue.priority || '').toLowerCase();
-      const isHighRiskPriority = p === 'highest' || p === 'high';
-      const isBug = (issue.type || '').toLowerCase().includes('bug');
-      const notDone = issue.statusCategory !== 'done';
-      return isStale || (isHighRiskPriority && notDone) || (isBug && notDone);
-    }).length;
+    return issues.filter(isRadarCandidate).length;
   }, [issues]);
 
   // Priority numeric rank for sorting
   const enrichedIssues = useMemo(() => {
-    const rankMap = { highest: 5, high: 4, medium: 3, low: 2, lowest: 1 };
+    const rankMap = { highest: 5, high: 4, medium: 3, low: 2, lowest: 1, unprioritized: 0 };
     return displayIssues.map((issue) => {
-      const p = (issue.priority || 'Medium').toLowerCase();
+      const p = (issue.priority || 'unprioritized').toLowerCase();
       return {
         ...issue,
-        priorityRank: rankMap[p] || 3,
+        priorityRank: rankMap[p] ?? 2,
       };
     });
   }, [displayIssues]);
 
-  // ── INLINE ACTION HANDLERS ──
+  const showTempBadge = (setter, key, msg) => {
+    setter((prev) => ({ ...prev, [key]: msg }));
+    setTimeout(() => {
+      setter((prev) => {
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
+    }, 3500);
+  };
+
+  // ── INLINE ACTION HANDLERS WITH OPTIMISTIC UPDATE + ROLLBACK ON FAILURE ──
   const handleStatusChange = async (issue, newStatus) => {
     setActiveDropdown(null);
+    const snapshot = {
+      status: issue.status,
+      statusCategory: issue.statusCategory,
+    };
     const newCat = getStatusCategoryKey(newStatus);
 
     // 1. Optimistic update
@@ -195,54 +211,74 @@ export default function DrillDownInspectorTable({
       });
     }
 
-    setActionSuccess((prev) => ({ ...prev, [issue.key]: `Status: ${newStatus}` }));
-    setTimeout(() => {
-      setActionSuccess((prev) => {
-        const next = { ...prev };
-        delete next[issue.key];
-        return next;
-      });
-    }, 3000);
-
-    // 2. Persist to backend resolver
+    // 2. Persist to backend resolver and roll back if rejected
     try {
-      await invoke('updateIssueStatus', {
+      const res = await invoke('updateIssueStatus', {
         issueKey: issue.key,
         statusName: newStatus,
       });
+      if (!res || !res.success) {
+        throw new Error(res?.error || 'Status transition rejected by Jira.');
+      }
+      if (onUpdateIssue && (res.newStatus || res.newStatusCategory)) {
+        onUpdateIssue(issue.id, {
+          status: res.newStatus || newStatus,
+          statusCategory: res.newStatusCategory || newCat,
+        });
+      }
+      showTempBadge(setActionSuccess, issue.key, `Status: ${res.newStatus || newStatus}`);
     } catch (err) {
-      console.warn('Status change backend notice:', err.message);
+      console.warn('Status change failed, rolling back:', err.message);
+      if (onUpdateIssue) {
+        onUpdateIssue(issue.id, snapshot);
+      }
+      showTempBadge(setActionError, issue.key, err.message || 'Status update failed');
     }
   };
 
   const handleAssigneeChange = async (issue, newAssignee) => {
     setActiveDropdown(null);
+    const snapshot = {
+      assignee: issue.assignee,
+      accountId: issue.accountId,
+      avatarUrl: issue.avatarUrl,
+    };
+    const isUnassign = newAssignee.toLowerCase() === 'unassigned';
+    const knownAccountId = isUnassign ? null : assigneeAccountIdMap[newAssignee];
 
     // 1. Optimistic update
     if (onUpdateIssue) {
       onUpdateIssue(issue.id, {
         assignee: newAssignee,
-        avatarUrl: assigneeAvatarMap[newAssignee] || null,
+        accountId: knownAccountId ?? null,
+        avatarUrl: isUnassign ? null : assigneeAvatarMap[newAssignee] || null,
       });
     }
 
-    setActionSuccess((prev) => ({ ...prev, [issue.key]: `Assigned: ${newAssignee}` }));
-    setTimeout(() => {
-      setActionSuccess((prev) => {
-        const next = { ...prev };
-        delete next[issue.key];
-        return next;
-      });
-    }, 3000);
-
-    // 2. Persist to backend resolver
+    // 2. Persist to backend resolver and roll back if rejected
     try {
-      await invoke('updateIssueAssignee', {
+      const res = await invoke('updateIssueAssignee', {
         issueKey: issue.key,
         assigneeName: newAssignee,
+        accountId: knownAccountId,
       });
+      if (!res || !res.success) {
+        throw new Error(res?.error || 'Assignee update rejected by Jira.');
+      }
+      if (onUpdateIssue) {
+        onUpdateIssue(issue.id, {
+          assignee: res.assignee || newAssignee,
+          accountId: res.accountId ?? knownAccountId ?? null,
+          avatarUrl: res.avatarUrl || assigneeAvatarMap[newAssignee] || null,
+        });
+      }
+      showTempBadge(setActionSuccess, issue.key, `Assigned: ${res.assignee || newAssignee}`);
     } catch (err) {
-      console.warn('Assignee change backend notice:', err.message);
+      console.warn('Assignee change failed, rolling back:', err.message);
+      if (onUpdateIssue) {
+        onUpdateIssue(issue.id, snapshot);
+      }
+      showTempBadge(setActionError, issue.key, err.message || 'Reassign failed');
     }
   };
 
@@ -307,6 +343,7 @@ export default function DrillDownInspectorTable({
           const issue = row.original;
           const isStale = issue.isStale || (issue.daysInactive !== undefined && issue.daysInactive >= 3);
           const feedback = actionSuccess[issue.key];
+          const errorFeedback = actionError[issue.key];
 
           return (
             <div className="min-w-0 max-w-md">
@@ -324,6 +361,15 @@ export default function DrillDownInspectorTable({
                   <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[9px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 animate-in fade-in shrink-0">
                     <Check className="w-3 h-3 text-emerald-400" />
                     <span>{feedback}</span>
+                  </span>
+                )}
+                {errorFeedback && (
+                  <span
+                    role="alert"
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[9px] font-bold bg-rose-500/20 text-rose-300 border border-rose-500/40 animate-in fade-in shrink-0"
+                  >
+                    <AlertTriangle className="w-3 h-3 text-rose-400" />
+                    <span>{errorFeedback}</span>
                   </span>
                 )}
               </div>
@@ -647,6 +693,7 @@ export default function DrillDownInspectorTable({
       assigneeAvatarMap,
       activeDropdown,
       actionSuccess,
+      actionError,
       statusesList,
     ]
   );

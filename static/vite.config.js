@@ -12,8 +12,10 @@ export default defineConfig({
     rollupOptions: {
       output: {
         manualChunks: {
-          vendor: ['react', 'react-dom'],
+          vendor: ['react', 'react-dom', 'zustand'],
           charts: ['recharts'],
+          echarts: ['echarts', 'echarts-for-react'],
+          grid: ['react-grid-layout', 'react-resizable', '@tanstack/react-table'],
           icons: ['lucide-react'],
         },
       },

@@ -95,12 +95,61 @@ export default function CustomExplorerView({
   statusesList = ['To Do', 'In Progress', 'Done'],
 }) {
   const { width, containerRef } = useContainerWidth({ initialWidth: 1200 });
-  const [widgets, setWidgets] = useState(DEFAULT_WIDGETS);
-  const [layouts, setLayouts] = useState(DEFAULT_LAYOUTS);
+  const storageKey = `agile_pulse_explorer_v1_${selectedProject?.key || 'default'}`;
+
+  const [widgets, setWidgets] = useState(() => {
+    try {
+      const saved = window.localStorage.getItem(`${storageKey}_widgets`);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch (e) {
+      // Ignore storage access errors in strict iframe sandboxes
+    }
+    return DEFAULT_WIDGETS;
+  });
+
+  const [layouts, setLayouts] = useState(() => {
+    try {
+      const saved = window.localStorage.getItem(`${storageKey}_layouts`);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed && typeof parsed === 'object') return parsed;
+      }
+    } catch (e) {
+      // Ignore storage access errors
+    }
+    return DEFAULT_LAYOUTS;
+  });
+
   const [selectedWidgetId, setSelectedWidgetId] = useState('widget-1');
   const [expandedWidgetId, setExpandedWidgetId] = useState(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [inspectorOpen, setInspectorOpen] = useState(false);
+
+  // Persist widgets & layouts to localStorage whenever modified
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(`${storageKey}_widgets`, JSON.stringify(widgets));
+      window.localStorage.setItem(`${storageKey}_layouts`, JSON.stringify(layouts));
+    } catch (e) {
+      // Ignore storage quota / sandbox errors
+    }
+  }, [storageKey, widgets, layouts]);
+
+  // Close overlays on Escape key
+  useEffect(() => {
+    if (!expandedWidgetId && !inspectorOpen) return undefined;
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape') {
+        if (expandedWidgetId) setExpandedWidgetId(null);
+        else if (inspectorOpen) setInspectorOpen(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [expandedWidgetId, inspectorOpen]);
 
   // Global cross-filtering state from Zustand
   const {
@@ -118,19 +167,12 @@ export default function CustomExplorerView({
 
   const isCrossFiltered = hasActiveFilters();
 
-  // Slide open the inspector drawer whenever user clicks a chart slice / cross-filter
-  useEffect(() => {
-    if (isCrossFiltered) {
-      setInspectorOpen(true);
-    }
-  }, [isCrossFiltered, selectedType, selectedStatus, selectedAssignee, selectedPriority]);
-
   // Compute cross-filtered issues dynamically across all active filters
   const crossFilteredIssues = useMemo(() => {
     return allIssues.filter((issue) => {
       if (selectedType && issue.type !== selectedType) return false;
       if (selectedAssignee && issue.assignee !== selectedAssignee) return false;
-      if (selectedPriority && (issue.priority || 'Medium') !== selectedPriority) return false;
+      if (selectedPriority && (issue.priority || 'Unprioritized') !== selectedPriority) return false;
       if (selectedStatus) {
         const cat = issue.statusCategory;
         const sName = (issue.status || '').toLowerCase();
@@ -542,6 +584,9 @@ export default function CustomExplorerView({
       {/* ── EXPANDED / FULLSCREEN FOCUS VIEW OVERLAY ── */}
       {expandedWidget && (
         <div
+          role="dialog"
+          aria-modal="true"
+          aria-label={expandedWidget.title || 'Expanded Chart View'}
           className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4 sm:p-8 animate-in fade-in duration-200"
           onClick={() => setExpandedWidgetId(null)}
         >
@@ -582,6 +627,9 @@ export default function CustomExplorerView({
       {/* ── SLIDE-UP BOTTOM DRAWER / MODAL: ISSUE INSPECTOR ── */}
       {inspectorOpen && (
         <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Issue Drill-Down Inspector"
           className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex flex-col justify-end p-2 sm:p-4 animate-in fade-in duration-200"
           onClick={() => setInspectorOpen(false)}
         >

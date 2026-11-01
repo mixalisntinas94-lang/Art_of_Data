@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { invoke, view } from '@forge/bridge';
 import {
   AlertTriangle,
@@ -52,27 +52,77 @@ export default function App() {
   } = useFilterStore();
 
   const isCrossFiltered = hasActiveFilters();
+  const latestRequestIdRef = useRef(0);
 
-  // Fetch product context and Jira projects on mount
+  // Load analytics for a specific project (race-condition safe via latestRequestIdRef)
+  const loadProjectAnalytics = useCallback(
+    async (projectKey, { resetActiveFilters = false } = {}) => {
+      const reqId = ++latestRequestIdRef.current;
+      try {
+        setLoading(true);
+        setError(null);
+        if (resetActiveFilters) {
+          resetFilters();
+        }
+
+        const res = await invoke('getProjectAnalytics', {
+          projectKey,
+          sprint: 'active',
+        });
+
+        // Ignore stale out-of-order responses
+        if (reqId !== latestRequestIdRef.current) return;
+
+        if (res && res.success) {
+          setAnalytics(res);
+          setLastRefreshed(new Date().toLocaleTimeString());
+        } else {
+          setError(res?.error || 'Failed to fetch project analytics.');
+        }
+      } catch (err) {
+        if (reqId !== latestRequestIdRef.current) return;
+        console.error('Analytics load error:', err);
+        setError(err.message || 'Error communicating with Forge resolver.');
+      } finally {
+        if (reqId === latestRequestIdRef.current) {
+          setLoading(false);
+        }
+      }
+    },
+    [resetFilters]
+  );
+
+  // Fetch product context and Jira projects on mount (honouring projectPage context when present)
   useEffect(() => {
+    let cancelled = false;
     async function init() {
       try {
         setLoading(true);
+        let ctxProjectKey = null;
         if (view && view.getContext) {
           const ctx = await view.getContext();
+          if (cancelled) return;
           setContext(ctx);
+          ctxProjectKey = ctx?.extension?.project?.key || null;
         }
 
         const res = await invoke('getProjects');
+        if (cancelled) return;
+
         if (res && res.success && res.projects && res.projects.length > 0) {
           setProjects(res.projects);
-          setSelectedProject(res.projects[0]);
-          await loadProjectAnalytics(res.projects[0].key);
+          const targetKey = ctxProjectKey || res.contextProjectKey;
+          const initialProject =
+            (targetKey && res.projects.find((p) => p.key === targetKey)) ||
+            res.projects[0];
+          setSelectedProject(initialProject);
+          await loadProjectAnalytics(initialProject.key, { resetActiveFilters: true });
         } else {
           setError(res?.error || 'No accessible Jira projects found.');
           setLoading(false);
         }
       } catch (err) {
+        if (cancelled) return;
         console.error('Initialization error:', err);
         setError(err.message || 'Failed to initialize Custom UI.');
         setLoading(false);
@@ -80,48 +130,24 @@ export default function App() {
     }
 
     init();
-  }, []);
+    return () => {
+      cancelled = true;
+    };
+  }, [loadProjectAnalytics]);
 
-  // Load analytics for a specific project
-  const loadProjectAnalytics = async (projectKey) => {
-    try {
-      setLoading(true);
-      setError(null);
-      resetFilters();
-
-      const res = await invoke('getProjectAnalytics', {
-        projectKey,
-        sprint: 'active',
-      });
-
-      if (res && res.success) {
-        setAnalytics(res);
-        setLastRefreshed(new Date().toLocaleTimeString());
-      } else {
-        setError(res?.error || 'Failed to fetch project analytics.');
-      }
-    } catch (err) {
-      console.error('Analytics load error:', err);
-      setError(err.message || 'Error communicating with Forge resolver.');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const [liveIssues, setLiveIssues] = useState([]);
-
-  useEffect(() => {
-    if (analytics?.rawIssues) {
-      setLiveIssues(analytics.rawIssues);
-    }
-  }, [analytics?.rawIssues]);
-
-  const allIssues = liveIssues.length > 0 ? liveIssues : (analytics?.rawIssues || []);
+  // Single source of truth for issues inside analytics state (prevents stale issues across empty projects)
+  const allIssues = useMemo(() => analytics?.rawIssues || [], [analytics?.rawIssues]);
 
   const handleUpdateIssue = useCallback((issueId, updates) => {
-    setLiveIssues((prev) =>
-      prev.map((i) => (i.id === issueId || i.key === issueId ? { ...i, ...updates } : i))
-    );
+    setAnalytics((prev) => {
+      if (!prev || !Array.isArray(prev.rawIssues)) return prev;
+      return {
+        ...prev,
+        rawIssues: prev.rawIssues.map((i) =>
+          i.id === issueId || i.key === issueId ? { ...i, ...updates } : i
+        ),
+      };
+    });
   }, []);
 
   // Filter raw issues according to active cross-filters
@@ -133,7 +159,7 @@ export default function App() {
       if (selectedAssignee && issue.assignee !== selectedAssignee) {
         return false;
       }
-      if (selectedPriority && (issue.priority || 'Medium') !== selectedPriority) {
+      if (selectedPriority && (issue.priority || 'Unprioritized') !== selectedPriority) {
         return false;
       }
       if (selectedStatus) {
@@ -182,7 +208,7 @@ export default function App() {
         if (!isEst) unestimatedSPCount++;
       }
 
-      if ((issue.type || '').toLowerCase().includes('bug')) {
+      if (Boolean(issue.isBug) || /\b(bug|defect|incident|σφάλμα|λάθος)\b/i.test(issue.type || '')) {
         bugCount++;
       }
 
@@ -213,11 +239,14 @@ export default function App() {
     };
   }, [analytics, filteredIssues]);
 
-  // Sprint Time Elapsed & Pacing Logic
-  const sprintTimeElapsed = analytics?.sprintTimeElapsedPercent ?? 50;
-  const paceGap = sprintTimeElapsed - (kpis?.completionRate ?? 0);
-  const isBehindSchedule = paceGap > 15;
-  const isSlightlyBehind = paceGap > 0 && paceGap <= 15;
+  // Sprint Time Elapsed & Pacing Logic (null-aware when no sprint dates exist)
+  const hasRealSprintDates =
+    analytics?.sprintTimeElapsedPercent !== null &&
+    analytics?.sprintTimeElapsedPercent !== undefined;
+  const sprintTimeElapsed = hasRealSprintDates ? analytics.sprintTimeElapsedPercent : 0;
+  const paceGap = hasRealSprintDates ? sprintTimeElapsed - (kpis?.completionRate ?? 0) : 0;
+  const isBehindSchedule = hasRealSprintDates && paceGap > 15;
+  const isSlightlyBehind = hasRealSprintDates && paceGap > 0 && paceGap <= 15;
 
   // Count total stale / blocker issues for badge
   const staleIssuesCount = useMemo(() => {
@@ -374,7 +403,7 @@ export default function App() {
                 const proj = projects.find((p) => p.key === e.target.value);
                 if (proj) {
                   setSelectedProject(proj);
-                  loadProjectAnalytics(proj.key);
+                  loadProjectAnalytics(proj.key, { resetActiveFilters: true });
                 }
               }}
               className="bg-slate-900 border border-slate-700 text-xs text-slate-200 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500 font-medium"
@@ -502,11 +531,31 @@ export default function App() {
 
       {/* ── ERROR STATE ── */}
       {error && (
-        <div className="mt-4 p-4 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-400 flex items-start gap-3">
+        <div role="alert" className="mt-4 p-4 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-400 flex items-start gap-3">
           <AlertTriangle className="w-5 h-5 shrink-0 mt-0.5" />
           <div>
             <h4 className="font-semibold text-sm">System Notice</h4>
             <p className="text-xs text-rose-300/90 mt-0.5">{error}</p>
+          </div>
+        </div>
+      )}
+
+      {/* ── TRUNCATION OR SPRINT FALLBACK NOTICE ── */}
+      {analytics && (analytics.isTruncated || analytics.sprintFallbackOccurred) && (
+        <div className="mt-3 px-3.5 py-2 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+            <span>
+              {analytics.isTruncated && (
+                <>
+                  Showing first <strong>{allIssues.length}</strong> of{' '}
+                  <strong>{analytics.totalFound}</strong> matching issues.{' '}
+                </>
+              )}
+              {analytics.sprintFallbackOccurred && (
+                <>No active sprint detected — displaying full project scope.</>
+              )}
+            </span>
           </div>
         </div>
       )}

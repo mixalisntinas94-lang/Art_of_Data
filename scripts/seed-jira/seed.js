@@ -36,6 +36,19 @@ if (!JIRA_DOMAIN || !JIRA_EMAIL || !JIRA_API_TOKEN) {
   process.exit(1);
 }
 
+// Strict domain & project key validation (prevent sending Basic Auth token to non-Atlassian hosts)
+if (!/^[a-z0-9-]+\.atlassian\.net$/i.test(JIRA_DOMAIN.trim())) {
+  console.error(
+    "❌ Μη έγκυρο JIRA_DOMAIN! Πρέπει να είναι της μορφής '<site>.atlassian.net' (χωρίς https:// ή slashes)."
+  );
+  process.exit(1);
+}
+
+if (!/^[A-Z][A-Z0-9_]{1,15}$/i.test(PROJECT_KEY.trim())) {
+  console.error("❌ Μη έγκυρο JIRA_PROJECT_KEY!");
+  process.exit(1);
+}
+
 // Ελέγχουμε αν τρέχουμε σε dry-run mode (δεν στέλνει requests στο Jira)
 const IS_DRY_RUN = process.argv.includes("--dry-run");
 

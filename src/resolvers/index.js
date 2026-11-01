@@ -4,129 +4,207 @@ import api, { route } from '@forge/api';
 const resolver = new Resolver();
 
 /**
- * Helper to execute Jira REST API requests.
- * In accordance with Forge best practices and security rules:
- * We attempt asUser() first to inherit the caller's permissions and access checks.
- * If the user context is not present, we gracefully fall back to asApp() to complete the read request.
+ * Shared constant for stale issue threshold (in days of inactivity).
+ * Used consistently across KPI counters, staleIssues list, and rawIssues flags.
+ */
+const STALE_DAYS_THRESHOLD = 3;
+
+/**
+ * Validation & sanitization helpers for JQL and Jira identifiers.
+ */
+const PROJECT_KEY_REGEX = /^[A-Z][A-Z0-9_]{1,15}$/i;
+const ISSUE_KEY_REGEX = /^[A-Z][A-Z0-9_]+-\d+$/i;
+const BUG_TYPE_REGEX = /\b(bug|defect|incident|error|σφάλμα|λάθος)\b/i;
+
+function assertProjectKey(projectKey) {
+  const clean = String(projectKey || '').trim();
+  if (!PROJECT_KEY_REGEX.test(clean)) {
+    throw new Error('Invalid Jira project key format.');
+  }
+  return clean;
+}
+
+function assertIssueKey(issueKey) {
+  const clean = String(issueKey || '').trim();
+  if (!ISSUE_KEY_REGEX.test(clean)) {
+    throw new Error('Invalid Jira issue key format.');
+  }
+  return clean;
+}
+
+/**
+ * Safely escapes a string value for inclusion inside a double-quoted JQL literal.
+ * Escapes backslashes FIRST, then double quotes, and strips control characters.
+ */
+function jqlQuote(value) {
+  return String(value ?? '')
+    .replace(/[\r\n\t]/g, ' ')
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"');
+}
+
+/**
+ * Checks that parentheses in a custom JQL snippet are balanced so it cannot
+ * break out of its enclosing `( ... )` group.
+ */
+function hasBalancedParentheses(clause) {
+  let depth = 0;
+  let inQuotes = false;
+  for (let i = 0; i < clause.length; i++) {
+    const ch = clause[i];
+    if (ch === '\\' && inQuotes) {
+      i++; // skip escaped character
+      continue;
+    }
+    if (ch === '"') {
+      inQuotes = !inQuotes;
+    } else if (!inQuotes) {
+      if (ch === '(') depth++;
+      else if (ch === ')') {
+        depth--;
+        if (depth < 0) return false;
+      }
+    }
+  }
+  return depth === 0 && !inQuotes;
+}
+
+/**
+ * Maps HTTP status codes to safe user-facing messages without leaking raw Jira internals.
+ */
+function mapJiraStatusToSafeError(status, contextLabel = 'Jira API request') {
+  if (status === 400) return `${contextLabel} failed: Invalid query or filter parameters (400).`;
+  if (status === 401) return `${contextLabel} failed: Authentication required (401).`;
+  if (status === 403) return `${contextLabel} failed: You do not have permission to access or modify this resource (403).`;
+  if (status === 404) return `${contextLabel} failed: Requested Jira resource was not found (404).`;
+  if (status === 429) return `${contextLabel} failed: Jira rate limit reached. Please wait a moment and retry (429).`;
+  return `${contextLabel} failed with status ${status}.`;
+}
+
+/**
+ * Executes a Jira REST API request strictly under the current user's context (`asUser()`).
+ *
+ * Security Guarantees:
+ * 1. NEVER falls back to `asApp()` — prevents privilege escalation on restricted projects/issues.
+ * 2. Handles HTTP 204 No Content responses cleanly.
+ * 3. Automatically retries HTTP 429 Too Many Requests (up to 2 retries respecting Retry-After).
+ * 4. Logs raw error details server-side only and throws sanitized messages for the client.
  *
  * @param {Object} endpointRoute - The tagged route template from @forge/api.
  * @param {Object} options - Request options (method, headers, body, etc.).
  * @returns {Promise<Object>} - The parsed JSON response from Jira.
  */
 async function fetchJira(endpointRoute, options = {}) {
-  try {
+  const MAX_RETRIES = 2;
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     const userRes = await api.asUser().requestJira(endpointRoute, options);
+
     if (userRes.ok) {
       if (userRes.status === 204) return { success: true };
       const text = await userRes.text();
       return text ? JSON.parse(text) : { success: true };
     }
-  } catch (err) {
-    // Fallback to asApp() if asUser() context is unavailable or unauthorized
-  }
 
-  const appRes = await api.asApp().requestJira(endpointRoute, options);
-  if (!appRes.ok) {
-    const errorText = await appRes.text();
-    throw new Error(`Jira API error (${appRes.status}): ${errorText}`);
+    // Handle 429 Rate Limiting with backoff
+    if (userRes.status === 429 && attempt < MAX_RETRIES) {
+      const retryAfterHeader = Number(userRes.headers?.get?.('Retry-After'));
+      const delayMs = !isNaN(retryAfterHeader) && retryAfterHeader > 0
+        ? Math.min(retryAfterHeader * 1000, 4000)
+        : (attempt + 1) * 1000;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      continue;
+    }
+
+    const rawErrorText = await userRes.text().catch(() => '');
+    console.warn(`Jira API error (${userRes.status}):`, rawErrorText.slice(0, 500));
+
+    const err = new Error(mapJiraStatusToSafeError(userRes.status));
+    err.status = userRes.status;
+    throw err;
   }
-  if (appRes.status === 204) return { success: true };
-  const text = await appRes.text();
-  return text ? JSON.parse(text) : { success: true };
 }
 
 /**
- * In-memory module cache for Story Point field IDs.
- * Persists across warm Forge container invocations to avoid repeated /rest/api/3/field API requests.
+ * Unified in-memory cache for Jira field metadata (/rest/api/3/field).
+ * Populates both Story Point and Sprint custom field IDs in a single API call.
  */
 let cachedStoryPointFields = null;
-let lastFieldCacheTime = 0;
-const FIELD_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour TTL
-
-/**
- * Helper to dynamically discover the custom field ID(s) used for Story Points in the Jira instance.
- *
- * Why this is necessary:
- * Different Jira instances and project types store Story Points in different custom fields:
- * - Team-managed projects: often "Story point estimate" (customfield_10016)
- * - Company-managed projects: often "Story Points" (customfield_10026 or customfield_10028)
- *
- * Querying Jira's /rest/api/3/field endpoint dynamically discovers all fields matching "story point",
- * allowing seamless compatibility without hardcoding.
- *
- * @returns {Promise<string[]>} - Array of field IDs corresponding to Story Points.
- */
-async function getStoryPointFieldIds() {
-  const now = Date.now();
-  if (cachedStoryPointFields && now - lastFieldCacheTime < FIELD_CACHE_TTL_MS) {
-    return cachedStoryPointFields;
-  }
-
-  const detectedFieldIds = new Set(['customfield_10016', 'customfield_10026', 'customfield_10028']);
-
-  try {
-    const fields = await fetchJira(route`/rest/api/3/field`);
-    if (Array.isArray(fields)) {
-      fields.forEach((field) => {
-        const fieldName = (field.name || '').toLowerCase();
-        if (
-          fieldName === 'story points' ||
-          fieldName === 'story point estimate' ||
-          fieldName.includes('story point')
-        ) {
-          detectedFieldIds.add(field.id);
-        }
-      });
-    }
-    cachedStoryPointFields = Array.from(detectedFieldIds);
-    lastFieldCacheTime = now;
-  } catch (err) {
-    console.warn('Could not dynamically retrieve Jira fields list; continuing with fallback field IDs:', err.message);
-    if (cachedStoryPointFields) {
-      return cachedStoryPointFields;
-    }
-  }
-
-  return cachedStoryPointFields || Array.from(detectedFieldIds);
-}
-
 let cachedSprintFields = null;
-let lastSprintFieldCacheTime = 0;
+let lastFieldCacheTime = 0;
+let lastFieldFailureTime = 0;
+const FIELD_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour positive cache TTL
+const FIELD_FAILURE_TTL_MS = 60 * 1000; // 60s negative cache TTL on failure
 
-/**
- * Dynamically discovers sprint custom field IDs in Jira.
- */
-async function getSprintFieldIds() {
+async function ensureFieldMetadataCached() {
   const now = Date.now();
-  if (cachedSprintFields && now - lastSprintFieldCacheTime < FIELD_CACHE_TTL_MS) {
-    return cachedSprintFields;
+  if (
+    cachedStoryPointFields &&
+    cachedSprintFields &&
+    now - lastFieldCacheTime < FIELD_CACHE_TTL_MS
+  ) {
+    return;
   }
 
-  const detected = new Set(['sprint', 'customfield_10020', 'customfield_10010']);
+  // Respect negative cache window so a transient failure doesn't hammer /field
+  if (lastFieldFailureTime && now - lastFieldFailureTime < FIELD_FAILURE_TTL_MS) {
+    return;
+  }
+
+  const spIds = new Set();
+  const sprintIds = new Set(['sprint']);
+
   try {
     const fields = await fetchJira(route`/rest/api/3/field`);
     if (Array.isArray(fields)) {
       fields.forEach((field) => {
+        if (!field || !field.id) return;
         const fieldName = (field.name || '').toLowerCase();
         const customType = (field.schema?.custom || '').toLowerCase();
-        if (fieldName === 'sprint' || customType.includes('sprint') || customType.includes('gh-sprint')) {
-          detected.add(field.id);
+
+        if (fieldName.includes('story point')) {
+          spIds.add(field.id);
+        }
+        if (
+          fieldName === 'sprint' ||
+          customType.includes('sprint') ||
+          customType.includes('gh-sprint')
+        ) {
+          sprintIds.add(field.id);
         }
       });
     }
-    cachedSprintFields = Array.from(detected);
-    lastSprintFieldCacheTime = now;
-  } catch (err) {
-    console.warn('Could not discover sprint fields dynamically:', err.message);
-  }
 
-  return cachedSprintFields || Array.from(detected);
+    cachedStoryPointFields =
+      spIds.size > 0
+        ? Array.from(spIds)
+        : ['customfield_10016', 'customfield_10026', 'customfield_10028'];
+    cachedSprintFields =
+      sprintIds.size > 1
+        ? Array.from(sprintIds)
+        : ['sprint', 'customfield_10020'];
+    lastFieldCacheTime = now;
+    lastFieldFailureTime = 0;
+  } catch (err) {
+    lastFieldFailureTime = now;
+    console.warn('Could not dynamically retrieve Jira fields list; using fallback IDs:', err.message);
+  }
+}
+
+async function getStoryPointFieldIds() {
+  await ensureFieldMetadataCached();
+  return cachedStoryPointFields || ['customfield_10016', 'customfield_10026', 'customfield_10028'];
+}
+
+async function getSprintFieldIds() {
+  await ensureFieldMetadataCached();
+  return cachedSprintFields || ['sprint', 'customfield_10020'];
 }
 
 /**
- * Helper to fetch Jira issues with automatic pagination.
- * Loops through pages of 100 issues up to maxTotalIssues (default 1000).
- * Supports Jira Cloud v3 cursor pagination (nextPageToken) as well as offset pagination (startAt).
+ * Helper to fetch Jira issues with cursor pagination via POST /rest/api/3/search/jql.
+ * Loops through pages of 100 issues up to maxTotalIssues (default 1000) and respects a
+ * 19-second wall-clock deadline so we never exceed Forge's 25s invocation limit.
  *
  * @param {string} jql - JQL query string.
  * @param {string[]} fieldsList - Array of fields to return.
@@ -135,120 +213,85 @@ async function getSprintFieldIds() {
  */
 async function fetchAllIssues(jql, fieldsList, maxTotalIssues = 1000) {
   const PAGE_SIZE = 100;
+  const DEADLINE_MS = 19000;
+  const startWallMs = Date.now();
+
   const allIssues = [];
   let nextPageToken = null;
-  let startAt = 0;
-  let totalFound = 0;
   let hasMore = true;
+  let stoppedEarly = false;
 
-  let searchError = null;
+  // Query approximate total count in parallel (non-blocking fallback if unsupported)
+  const cleanJqlForCount = jql.replace(/\s+ORDER\s+BY\s+.+$/i, '').trim();
+  const countPromise = fetchJira(route`/rest/api/3/search/approximate-count`, {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ jql: cleanJqlForCount }),
+  }).catch(() => null);
 
   while (hasMore && allIssues.length < maxTotalIssues) {
-    let pageData = null;
+    if (allIssues.length > 0 && Date.now() - startWallMs > DEADLINE_MS) {
+      stoppedEarly = true;
+      break;
+    }
 
-    // Strategy 1: Modern Jira Cloud v3 search endpoint with nextPageToken / startAt
+    const requestBody = {
+      jql,
+      maxResults: PAGE_SIZE,
+      fields: fieldsList,
+    };
+    if (nextPageToken) {
+      requestBody.nextPageToken = nextPageToken;
+    }
+
+    let pageData;
     try {
-      const requestBody = {
-        jql,
-        maxResults: PAGE_SIZE,
-        fields: fieldsList,
-      };
-
-      if (nextPageToken) {
-        requestBody.nextPageToken = nextPageToken;
-      } else if (startAt > 0) {
-        requestBody.startAt = startAt;
-      }
-
       pageData = await fetchJira(route`/rest/api/3/search/jql`, {
         method: 'POST',
         headers: {
-          'Accept': 'application/json',
+          Accept: 'application/json',
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(requestBody),
       });
-    } catch (postErr) {
-      searchError = postErr;
-      // Strategy 2: Fallback to classic POST /rest/api/3/search
-      try {
-        pageData = await fetchJira(route`/rest/api/3/search`, {
-          method: 'POST',
-          headers: {
-            'Accept': 'application/json',
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            jql,
-            startAt,
-            maxResults: PAGE_SIZE,
-            fields: fieldsList,
-          }),
-        });
-      } catch (fallbackPostErr) {
-        searchError = fallbackPostErr;
-        // Strategy 3: Fallback to GET /rest/api/3/search
-        try {
-          const fieldsStr = fieldsList.join(',');
-          pageData = await fetchJira(
-            route`/rest/api/3/search?jql=${jql}&startAt=${startAt}&maxResults=${PAGE_SIZE}&fields=${fieldsStr}`
-          );
-        } catch (getErr) {
-          searchError = getErr;
-          console.error('Failed to fetch page of issues in pagination loop:', getErr.message);
-          break;
-        }
+    } catch (err) {
+      if (allIssues.length === 0) {
+        throw err;
       }
-    }
-
-    // If on the very first page no data was returned due to an error, surface the error
-    if (!pageData && allIssues.length === 0 && searchError) {
-      throw new Error(`Jira search query failed: ${searchError.message}`);
+      console.warn('Pagination stopped early due to error on subsequent page:', err.message);
+      stoppedEarly = true;
+      break;
     }
 
     const currentBatch = pageData?.issues || [];
     if (!currentBatch.length) {
+      hasMore = false;
       break;
     }
 
     allIssues.push(...currentBatch);
 
-    // Track total in Jira
-    if (typeof pageData.total === 'number') {
-      totalFound = pageData.total;
-    } else if (typeof pageData.totalCount === 'number') {
-      totalFound = pageData.totalCount;
-    } else {
-      totalFound = Math.max(totalFound, allIssues.length);
-    }
-
-    // Determine if more pages exist
-    if (pageData.nextPageToken) {
-      nextPageToken = pageData.nextPageToken;
-      hasMore = !pageData.isLast && allIssues.length < totalFound;
-    } else {
-      startAt += currentBatch.length;
-      hasMore = currentBatch.length === PAGE_SIZE && allIssues.length < totalFound;
-    }
-
-    if (pageData.isLast === true) {
-      hasMore = false;
-    }
+    nextPageToken = pageData.nextPageToken || null;
+    hasMore = Boolean(nextPageToken) && pageData.isLast !== true;
   }
 
+  const countRes = await countPromise;
+  const approxTotal = typeof countRes?.count === 'number' ? countRes.count : 0;
+  const isTruncated = stoppedEarly || (hasMore && allIssues.length >= maxTotalIssues) || approxTotal > allIssues.length;
+  const totalFound = Math.max(approxTotal, allIssues.length);
+
   return {
-    issues: allIssues,
-    totalFound: totalFound || allIssues.length,
-    isTruncated: totalFound > allIssues.length,
+    issues: allIssues.slice(0, maxTotalIssues),
+    totalFound,
+    isTruncated,
   };
 }
 
 /**
  * Helper function to safely extract and parse a numeric Story Point value from an issue's fields.
- *
- * @param {Object} fields - The fields object of a Jira issue.
- * @param {string[]} candidateFieldIds - List of candidate Story Point custom field IDs.
- * @returns {number|null} - The numeric story points value, or null if unestimated.
  */
 function extractStoryPoints(fields, candidateFieldIds) {
   if (!fields) return null;
@@ -263,23 +306,43 @@ function extractStoryPoints(fields, candidateFieldIds) {
     }
   }
 
-  if (fields.storyPoints !== undefined && fields.storyPoints !== null && fields.storyPoints !== '') {
-    const parsedNumber = Number(fields.storyPoints);
-    if (!isNaN(parsedNumber) && parsedNumber >= 0) {
-      return parsedNumber;
+  return null;
+}
+
+/**
+ * Helper to extract sprint objects from an issue's custom sprint fields.
+ */
+function collectSprintsFromFields(fields, sprintFieldIds, targetMap, onActiveSprint) {
+  if (!fields) return;
+  for (const fieldId of sprintFieldIds) {
+    const val = fields[fieldId];
+    const items = Array.isArray(val) ? val : val && typeof val === 'object' ? [val] : [];
+    for (const item of items) {
+      if (item && item.name) {
+        const state = (item.state || '').toLowerCase();
+        if (state === 'active' && onActiveSprint) {
+          onActiveSprint(item);
+        }
+        targetMap.set(item.name, {
+          name: item.name,
+          value: item.name,
+          state: state || 'closed',
+          startDate: item.startDate || null,
+          endDate: item.endDate || null,
+        });
+      }
     }
   }
-
-  return null;
 }
 
 /**
  * Resolver: getProjects
  * Fetches accessible Jira projects for the project selector dropdown.
  */
-resolver.define('getProjects', async () => {
+resolver.define('getProjects', async (req) => {
   try {
-    const data = await fetchJira(route`/rest/api/3/project/search?maxResults=50&orderBy=name`);
+    const contextProjectKey = req.context?.extension?.project?.key || null;
+    const data = await fetchJira(route`/rest/api/3/project/search?maxResults=100&orderBy=name`);
     const projects = (data.values || []).map((proj) => ({
       id: proj.id,
       key: proj.key,
@@ -287,7 +350,7 @@ resolver.define('getProjects', async () => {
       projectTypeKey: proj.projectTypeKey,
       avatarUrl: proj.avatarUrls ? proj.avatarUrls['24x24'] : null,
     }));
-    return { success: true, projects };
+    return { success: true, projects, contextProjectKey };
   } catch (err) {
     return { success: false, error: err.message, projects: [] };
   }
@@ -298,33 +361,57 @@ resolver.define('getProjects', async () => {
  * Fetches available filter options (assignable users, issue types, statuses) for a project.
  */
 resolver.define('getProjectFilterOptions', async (req) => {
-  const { projectKey } = req.payload || {};
-  if (!projectKey) {
+  const rawProjectKey = req.payload?.projectKey || req.context?.extension?.project?.key;
+  if (!rawProjectKey) {
     return { success: false, error: 'Project key is required' };
   }
 
   try {
-    const [usersRes, statusesRes, prioritiesRes] = await Promise.allSettled([
-      fetchJira(route`/rest/api/3/user/assignable/search?project=${projectKey}&maxResults=50`),
-      fetchJira(route`/rest/api/3/project/${projectKey}/statuses`),
-      fetchJira(route`/rest/api/3/priority`),
-    ]);
+    const projectKey = assertProjectKey(rawProjectKey);
+    const sprintFieldIds = await getSprintFieldIds();
+
+    const [usersRes, statusesRes, prioritiesRes, suggestionsRes, sprintIssuesRes] =
+      await Promise.allSettled([
+        fetchJira(route`/rest/api/3/user/assignable/search?project=${projectKey}&maxResults=100`),
+        fetchJira(route`/rest/api/3/project/${projectKey}/statuses`),
+        fetchJira(route`/rest/api/3/priority`),
+        fetchJira(route`/rest/api/3/jql/autocompletedata/suggestions?fieldName=sprint`),
+        fetchJira(route`/rest/api/3/search/jql`, {
+          method: 'POST',
+          headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            jql: `project = "${jqlQuote(projectKey)}" AND sprint is not EMPTY ORDER BY updated DESC`,
+            maxResults: 50,
+            fields: ['summary', ...sprintFieldIds],
+          }),
+        }),
+      ]);
 
     const assignees =
       usersRes.status === 'fulfilled' && Array.isArray(usersRes.value)
-        ? usersRes.value.map((u) => ({ label: u.displayName, value: u.displayName }))
+        ? usersRes.value
+            .filter((u) => u && u.displayName)
+            .map((u) => ({
+              label: u.displayName,
+              value: u.displayName,
+              accountId: u.accountId || null,
+              avatarUrl: u.avatarUrls ? u.avatarUrls['24x24'] || u.avatarUrls['32x32'] : null,
+            }))
         : [];
 
     const issueTypesMap = new Map();
     const statusesMap = new Map();
 
     if (statusesRes.status === 'fulfilled' && Array.isArray(statusesRes.value)) {
-      statusesRes.value.forEach((item) => {
-        if (item.name) {
-          issueTypesMap.set(item.name, { label: item.name, value: item.name });
+      statusesRes.value.forEach((issueTypeEntry) => {
+        if (issueTypeEntry.name) {
+          issueTypesMap.set(issueTypeEntry.name, {
+            label: issueTypeEntry.name,
+            value: issueTypeEntry.name,
+          });
         }
-        if (Array.isArray(item.statuses)) {
-          item.statuses.forEach((st) => {
+        if (Array.isArray(issueTypeEntry.statuses)) {
+          issueTypeEntry.statuses.forEach((st) => {
             if (st.name) {
               statusesMap.set(st.name, { label: st.name, value: st.name });
             }
@@ -344,98 +431,46 @@ resolver.define('getProjectFilterOptions', async (req) => {
             { label: 'Lowest', value: 'Lowest' },
           ];
 
-    // Multi-source Sprint Discovery: JQL Autocomplete, Issue fields, and Agile Boards
+    // Discover Sprints from JQL suggestions & recent sprint issues (zero extra agile scopes required)
     const discoveredSprintsMap = new Map();
-    const sprintFieldIds = await getSprintFieldIds();
 
-    // 1. Try JQL Autocomplete suggestions for field "sprint"
-    try {
-      const suggestionsRes = await fetchJira(route`/rest/api/3/jql/autocompletedata/suggestions?fieldName=sprint`);
-      if (suggestionsRes && Array.isArray(suggestionsRes.results)) {
-        suggestionsRes.results.forEach((s) => {
-          if (s.value) {
-            discoveredSprintsMap.set(s.value, {
-              name: s.displayName || s.value,
-              value: s.value,
-              state: 'sprint',
-            });
-          }
-        });
-      }
-    } catch (suggErr) {
-      // JQL autocomplete endpoint not available
-    }
-
-    // 2. Query recent project issues that have sprints assigned
-    try {
-      const sprintIssues = await fetchJira(route`/rest/api/3/search/jql`, {
-        method: 'POST',
-        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          jql: `project = "${projectKey}" AND sprint is not EMPTY ORDER BY updated DESC`,
-          maxResults: 50,
-          fields: ['summary', ...sprintFieldIds],
-        }),
-      });
-
-      const issueList = sprintIssues?.issues || [];
-      issueList.forEach((issue) => {
-        const f = issue.fields || {};
-        sprintFieldIds.forEach((sFieldId) => {
-          const val = f[sFieldId];
-          if (Array.isArray(val)) {
-            val.forEach((s) => {
-              if (s && s.name) {
-                discoveredSprintsMap.set(s.name, {
-                  name: s.name,
-                  value: s.name,
-                  state: (s.state || '').toLowerCase(),
-                });
-              }
-            });
-          } else if (val && typeof val === 'object' && val.name) {
-            discoveredSprintsMap.set(val.name, {
-              name: val.name,
-              value: val.name,
-              state: (val.state || '').toLowerCase(),
-            });
-          }
-        });
-      });
-    } catch (issueSprintErr) {
-      // Ignore if search fallback fails
-    }
-
-    // 3. Try Agile Board Sprints if accessible
-    try {
-      const boardData = await fetchJira(route`/rest/agile/1.0/board?projectKeyOrId=${projectKey}`);
-      if (boardData && Array.isArray(boardData.values) && boardData.values.length > 0) {
-        const boardId = boardData.values[0].id;
-        const sprintsData = await fetchJira(route`/rest/agile/1.0/board/${boardId}/sprint?maxResults=50`);
-        if (sprintsData && Array.isArray(sprintsData.values)) {
-          sprintsData.values.forEach((s) => {
-            if (s && s.name) {
-              discoveredSprintsMap.set(s.name, {
-                name: s.name,
-                value: s.name,
-                state: (s.state || '').toLowerCase(),
-              });
-            }
+    if (
+      suggestionsRes.status === 'fulfilled' &&
+      Array.isArray(suggestionsRes.value?.results)
+    ) {
+      suggestionsRes.value.results.forEach((s) => {
+        if (s.value) {
+          discoveredSprintsMap.set(s.value, {
+            name: s.displayName || s.value,
+            value: s.value,
+            state: 'sprint',
           });
         }
-      }
-    } catch (agileErr) {
-      // Board/agile API not available
+      });
     }
 
-    // Categorize discovered sprints into Active, Future, and Closed
+    if (
+      sprintIssuesRes.status === 'fulfilled' &&
+      Array.isArray(sprintIssuesRes.value?.issues)
+    ) {
+      sprintIssuesRes.value.issues.forEach((issue) => {
+        collectSprintsFromFields(issue.fields, sprintFieldIds, discoveredSprintsMap);
+      });
+    }
+
     const activeNamedSprints = [];
     const futureNamedSprints = [];
     const closedNamedSprints = [];
 
     Array.from(discoveredSprintsMap.values()).forEach((s) => {
       const stateBadge =
-        s.state === 'active' ? ' (Active)' : s.state === 'future' ? ' (Future)' : s.state === 'closed' ? ' (Closed)' : '';
+        s.state === 'active'
+          ? ' (Active)'
+          : s.state === 'future'
+          ? ' (Future)'
+          : s.state === 'closed'
+          ? ' (Closed)'
+          : '';
       const option = {
         label: `${s.name}${stateBadge}`,
         value: s.value,
@@ -451,15 +486,10 @@ resolver.define('getProjectFilterOptions', async (req) => {
     });
 
     const sprintsOptions = [
-      // Primary Default View
       { label: 'Active Sprint (Current)', value: 'active' },
-
-      // Individual Sprints List (Active first, then Future, then Closed)
       ...activeNamedSprints,
       ...futureNamedSprints,
       ...closedNamedSprints,
-
-      // Quick Scope Presets
       { label: 'All Sprints & Project Scope', value: 'all' },
       { label: 'All Future Sprints', value: 'future' },
       { label: 'All Closed Sprints', value: 'closed' },
@@ -491,7 +521,7 @@ resolver.define('getProjectFilterOptions', async (req) => {
     return {
       success: false,
       error: err.message,
-      assignees: [{ label: 'All Assignees', value: 'all' }, { label: '👤 Unassigned', value: 'unassigned' }],
+      assignees: [{ label: 'All Assignees', value: 'all' }, { label: 'Unassigned', value: 'unassigned' }],
       sprints: [{ label: 'All Sprints', value: 'all' }],
       issueTypes: [{ label: 'All Issue Types', value: 'all' }],
       statuses: [{ label: 'All Statuses', value: 'all' }],
@@ -503,7 +533,6 @@ resolver.define('getProjectFilterOptions', async (req) => {
 /**
  * Resolver: getJqlAutocompleteData
  * Fetches JQL field names, functions, and reserved words from Jira's autocompletedata API.
- * Provides rich suggestions when users type custom JQL in the JQL filter tab.
  */
 resolver.define('getJqlAutocompleteData', async () => {
   try {
@@ -515,9 +544,10 @@ resolver.define('getJqlAutocompleteData', async () => {
       jqlReservedWords: data.jqlReservedWords || [],
     };
   } catch (err) {
-    console.warn('Could not fetch remote JQL autocomplete data, using comprehensive fallback:', err.message);
+    console.warn('Could not fetch remote JQL autocomplete data, using fallback:', err.message);
     return {
-      success: true, // provide graceful fallback data
+      success: true,
+      fallback: true,
       visibleFieldNames: [
         { value: 'assignee', displayName: 'Assignee' },
         { value: 'status', displayName: 'Status' },
@@ -569,11 +599,10 @@ resolver.define('getJqlAutocompleteData', async () => {
 /**
  * Resolver: getProjectAnalytics
  * Analyzes sprint & team metrics for a specific project.
- * Supports dynamic filtering by assignee, sprint, issue type, status, priority, and custom JQL!
  */
 resolver.define('getProjectAnalytics', async (req) => {
   const {
-    projectKey,
+    projectKey: payloadProjectKey,
     searchQuery,
     assignee,
     sprint,
@@ -583,21 +612,30 @@ resolver.define('getProjectAnalytics', async (req) => {
     customJql,
   } = req.payload || {};
 
-  if (!projectKey) {
+  const rawProjectKey = payloadProjectKey || req.context?.extension?.project?.key;
+  if (!rawProjectKey) {
     return { success: false, error: 'Project key is required' };
   }
 
   try {
-    // 1. Discover all candidate Story Points custom field IDs in this Jira instance
+    const projectKey = assertProjectKey(rawProjectKey);
     const storyPointFieldIds = await getStoryPointFieldIds();
+    const sprintFieldIds = await getSprintFieldIds();
 
-    // 2. Build dynamic JQL query based on active filters
-    const jqlClauses = [`project = "${projectKey}"`];
+    // Build dynamic JQL query with strict escaping
+    const jqlClauses = [`project = "${jqlQuote(projectKey)}"`];
 
-    // Optional Keyword Search (if passed)
+    // Optional Keyword Search (only include issuekey = ... if input is a valid issue key)
     if (searchQuery && searchQuery.trim()) {
-      const safeSearch = searchQuery.trim().replace(/"/g, '\\"');
-      jqlClauses.push(`(summary ~ "${safeSearch}" OR text ~ "${safeSearch}" OR issuekey = "${safeSearch}")`);
+      const trimmedSearch = searchQuery.trim();
+      const safeSearch = jqlQuote(trimmedSearch);
+      if (ISSUE_KEY_REGEX.test(trimmedSearch)) {
+        jqlClauses.push(
+          `(summary ~ "${safeSearch}" OR text ~ "${safeSearch}" OR issuekey = "${safeSearch}")`
+        );
+      } else {
+        jqlClauses.push(`(summary ~ "${safeSearch}" OR text ~ "${safeSearch}")`);
+      }
     }
 
     // Assignee filter
@@ -605,7 +643,7 @@ resolver.define('getProjectAnalytics', async (req) => {
       if (assignee === 'unassigned') {
         jqlClauses.push('assignee IS EMPTY');
       } else {
-        jqlClauses.push(`assignee = "${assignee.replace(/"/g, '\\"')}"`);
+        jqlClauses.push(`assignee = "${jqlQuote(assignee)}"`);
       }
     }
 
@@ -620,31 +658,36 @@ resolver.define('getProjectAnalytics', async (req) => {
       } else if (sprint === 'closed') {
         jqlClauses.push('sprint in closedSprints()');
       } else {
-        jqlClauses.push(`sprint = "${sprint.replace(/"/g, '\\"')}"`);
+        jqlClauses.push(`sprint = "${jqlQuote(sprint)}"`);
       }
     }
 
     // Issue Type filter
     if (issueType && issueType !== 'all') {
-      jqlClauses.push(`issuetype = "${issueType.replace(/"/g, '\\"')}"`);
+      jqlClauses.push(`issuetype = "${jqlQuote(issueType)}"`);
     }
 
     // Status filter
     if (status && status !== 'all') {
-      jqlClauses.push(`status = "${status.replace(/"/g, '\\"')}"`);
+      jqlClauses.push(`status = "${jqlQuote(status)}"`);
     }
 
     // Priority filter
     if (priority && priority !== 'all') {
-      jqlClauses.push(`priority = "${priority.replace(/"/g, '\\"')}"`);
+      jqlClauses.push(`priority = "${jqlQuote(priority)}"`);
     }
 
-    // Custom JQL clause filter (allows arbitrary user JQL filters like labels, components, etc.)
+    // Custom JQL clause filter with balanced-parentheses check
     let customOrderBy = 'ORDER BY updated DESC';
     if (customJql && customJql.trim()) {
       let rawClause = customJql.trim();
-      // Match and extract trailing ORDER BY if user provided one in customJql
-      const orderMatch = rawClause.match(/\s+order\s+by\s+(.+)$/i);
+      if (!hasBalancedParentheses(rawClause)) {
+        return {
+          success: false,
+          error: 'Custom JQL contains unbalanced parentheses or quotes.',
+        };
+      }
+      const orderMatch = rawClause.match(/\s+order\s+by\s+([a-zA-Z0-9_,\s"'[\]-]+)$/i);
       if (orderMatch) {
         customOrderBy = `ORDER BY ${orderMatch[1].trim()}`;
         rawClause = rawClause.substring(0, orderMatch.index).trim();
@@ -655,8 +698,6 @@ resolver.define('getProjectAnalytics', async (req) => {
     }
 
     const jql = `${jqlClauses.join(' AND ')} ${customOrderBy}`;
-
-    const sprintFieldIds = await getSprintFieldIds();
 
     const fieldsList = [
       'summary',
@@ -674,26 +715,29 @@ resolver.define('getProjectAnalytics', async (req) => {
       ...sprintFieldIds,
     ];
 
-    // Fetch all matching issues using paginated search (up to 1,000 issues)
+    // Fetch all matching issues using cursor pagination (up to 1,000 issues)
     let fetchResult;
     let sprintFallbackOccurred = false;
     try {
       fetchResult = await fetchAllIssues(jql, fieldsList, 1000);
-    } catch (fetchErr) {
-      if (
-        sprint === 'active' &&
-        fetchErr.message &&
-        (fetchErr.message.toLowerCase().includes('opensprints') ||
-          fetchErr.message.toLowerCase().includes('sprint'))
-      ) {
+      // If active sprint returned 0 issues (e.g. Kanban board or between sprints), fallback to project scope
+      if (sprint === 'active' && fetchResult.issues.length === 0) {
         sprintFallbackOccurred = true;
-        const fallbackClauses = jqlClauses.filter((c) => !c.includes('openSprints'));
+        const fallbackClauses = jqlClauses.filter((c) => c !== 'sprint in openSprints()');
+        const fallbackJql = `${fallbackClauses.join(' AND ')} ${customOrderBy}`;
+        fetchResult = await fetchAllIssues(fallbackJql, fieldsList, 1000);
+      }
+    } catch (fetchErr) {
+      if (sprint === 'active' && fetchErr.status === 400) {
+        sprintFallbackOccurred = true;
+        const fallbackClauses = jqlClauses.filter((c) => c !== 'sprint in openSprints()');
         const fallbackJql = `${fallbackClauses.join(' AND ')} ${customOrderBy}`;
         fetchResult = await fetchAllIssues(fallbackJql, fieldsList, 1000);
       } else {
         throw fetchErr;
       }
     }
+
     const { issues, totalFound, isTruncated } = fetchResult;
     const now = Date.now();
 
@@ -704,47 +748,17 @@ resolver.define('getProjectAnalytics', async (req) => {
     const projectSprintsMap = new Map();
 
     for (const issue of issues) {
-      const f = issue.fields || {};
-      for (const fieldId of sprintFieldIds) {
-        const val = f[fieldId];
-        if (Array.isArray(val)) {
-          val.forEach((item) => {
-            if (item && item.name) {
-              const state = (item.state || '').toLowerCase();
-              if (state === 'active' && !activeSprintName) {
-                activeSprintName = item.name;
-                activeSprintStartDate = item.startDate || null;
-                activeSprintEndDate = item.endDate || null;
-              }
-              projectSprintsMap.set(item.name, {
-                name: item.name,
-                value: item.name,
-                state: state || 'closed',
-                startDate: item.startDate || null,
-                endDate: item.endDate || null,
-              });
-            }
-          });
-        } else if (val && typeof val === 'object' && val.name) {
-          const state = (val.state || '').toLowerCase();
-          if (state === 'active' && !activeSprintName) {
-            activeSprintName = val.name;
-            activeSprintStartDate = val.startDate || null;
-            activeSprintEndDate = val.endDate || null;
-          }
-          projectSprintsMap.set(val.name, {
-            name: val.name,
-            value: val.name,
-            state: state || 'closed',
-            startDate: val.startDate || null,
-            endDate: val.endDate || null,
-          });
+      collectSprintsFromFields(issue.fields, sprintFieldIds, projectSprintsMap, (activeItem) => {
+        if (!activeSprintName) {
+          activeSprintName = activeItem.name;
+          activeSprintStartDate = activeItem.startDate || null;
+          activeSprintEndDate = activeItem.endDate || null;
         }
-      }
+      });
     }
 
-    // Sprint Time Elapsed Percentage (for real pacing vs work done)
-    let sprintTimeElapsedPercent = 50; // Default midpoint for active sprint
+    // Sprint Time Elapsed Percentage (null when no active sprint dates exist)
+    let sprintTimeElapsedPercent = null;
     if (activeSprintStartDate && activeSprintEndDate) {
       const startMs = new Date(activeSprintStartDate).getTime();
       const endMs = new Date(activeSprintEndDate).getTime();
@@ -755,7 +769,7 @@ resolver.define('getProjectAnalytics', async (req) => {
       }
     }
 
-    // 3. KPI Aggregations (tracking both Story Points & Time/Hours)
+    // KPI Aggregations (consistent definitions across backend & frontend)
     let totalStoryPoints = 0;
     let completedStoryPoints = 0;
     let inProgressStoryPoints = 0;
@@ -787,26 +801,25 @@ resolver.define('getProjectAnalytics', async (req) => {
       const statusCategory = fields.status?.statusCategory?.key || 'new';
       const statusName = fields.status?.name || 'Unknown';
       const typeName = fields.issuetype?.name || 'Task';
-      const priorityName = fields.priority?.name || 'Medium';
+      const priorityName = fields.priority?.name || 'Unprioritized';
       const assigneeName = fields.assignee?.displayName || 'Unassigned';
-      const isDone = statusCategory === 'done' || !!fields.resolutiondate;
+      const assigneeKey = fields.assignee?.accountId || assigneeName;
+
+      // Single source of truth for Done: statusCategory === 'done'
+      const isDone = statusCategory === 'done';
       const isInProgress = statusCategory === 'indeterminate';
+      const isBug = BUG_TYPE_REGEX.test(typeName);
 
       // Status counters for issue volume
       if (isDone) completedCount += 1;
       else if (isInProgress) inProgressCount += 1;
       else toDoCount += 1;
 
-      // Status breakdown
       statusMap[statusName] = (statusMap[statusName] || 0) + 1;
-
-      // Type breakdown & bug tracking
       typeMap[typeName] = (typeMap[typeName] || 0) + 1;
-      if (typeName.toLowerCase().includes('bug')) {
+      if (isBug) {
         bugCount += 1;
       }
-
-      // Priority breakdown
       priorityMap[priorityName] = (priorityMap[priorityName] || 0) + 1;
 
       // --- STORY POINTS CALCULATION ---
@@ -828,10 +841,11 @@ resolver.define('getProjectAnalytics', async (req) => {
         unestimatedPointsCount += 1;
       }
 
-      // --- TIME TRACKING / HOURS CALCULATION ---
-      const estSeconds = fields.timetracking?.originalEstimateSeconds || fields.timeestimate || 0;
+      // --- TIME TRACKING / HOURS CALCULATION (sum raw seconds, round once at end) ---
+      const estSeconds = fields.timetracking?.originalEstimateSeconds || 0;
       const spentSeconds = fields.timetracking?.timeSpentSeconds || fields.timespent || 0;
-      const remSeconds = fields.timetracking?.remainingEstimateSeconds || 0;
+      const remSeconds =
+        fields.timetracking?.remainingEstimateSeconds ?? fields.timeestimate ?? 0;
 
       totalEstimatedSeconds += estSeconds;
       totalLoggedSeconds += spentSeconds;
@@ -841,35 +855,34 @@ resolver.define('getProjectAnalytics', async (req) => {
         unestimatedHoursCount += 1;
       }
 
-      // Assignee tracking
-      if (!fields.assignee) {
+      // Count active unassigned issues
+      if (!fields.assignee && !isDone) {
         unassignedCount += 1;
       }
 
-      // Initialize team member record if first encountered
-      if (!assigneeMap[assigneeName]) {
-        assigneeMap[assigneeName] = {
+      // Initialize team member record keyed by accountId (prevents display-name collisions)
+      if (!assigneeMap[assigneeKey]) {
+        assigneeMap[assigneeKey] = {
           name: assigneeName,
-          avatarUrl: fields.assignee?.avatarUrls ? fields.assignee.avatarUrls['24x24'] : null,
+          accountId: fields.assignee?.accountId || null,
+          avatarUrl: fields.assignee?.avatarUrls
+            ? fields.assignee.avatarUrls['24x24'] || fields.assignee.avatarUrls['32x32']
+            : null,
           totalIssues: 0,
           completedIssues: 0,
           inProgressIssues: 0,
           toDoIssues: 0,
-          // Story point metrics
           totalPoints: 0,
           completedPoints: 0,
           remainingPoints: 0,
-          // Hour metrics
-          estimatedHours: 0,
-          loggedHours: 0,
-          remainingHours: 0,
+          estSeconds: 0,
+          spentSeconds: 0,
+          remSeconds: 0,
         };
       }
 
-      const member = assigneeMap[assigneeName];
+      const member = assigneeMap[assigneeKey];
       member.totalIssues += 1;
-
-      // Story points allocation per member
       member.totalPoints += issuePoints;
       if (isDone) {
         member.completedIssues += 1;
@@ -882,12 +895,11 @@ resolver.define('getProjectAnalytics', async (req) => {
         member.remainingPoints += issuePoints;
       }
 
-      // Hours allocation per member
-      member.estimatedHours += Math.round((estSeconds / 3600) * 10) / 10;
-      member.loggedHours += Math.round((spentSeconds / 3600) * 10) / 10;
-      member.remainingHours += Math.round((remSeconds / 3600) * 10) / 10;
+      member.estSeconds += estSeconds;
+      member.spentSeconds += spentSeconds;
+      member.remSeconds += remSeconds;
 
-      // Cycle time calculation (created to resolution)
+      // Lead/Cycle time calculation (created to resolution)
       if (isDone && fields.resolutiondate && fields.created) {
         const createdMs = new Date(fields.created).getTime();
         const resolvedMs = new Date(fields.resolutiondate).getTime();
@@ -897,11 +909,11 @@ resolver.define('getProjectAnalytics', async (req) => {
         }
       }
 
-      // Stale / Bottleneck issues (In progress or open without update for >= 4 days)
+      // Unified Stale check: non-done issues inactive for >= STALE_DAYS_THRESHOLD (3 days)
       if (!isDone && fields.updated) {
         const updatedMs = new Date(fields.updated).getTime();
         const daysInactive = Math.floor((now - updatedMs) / (1000 * 60 * 60 * 24));
-        if (daysInactive >= 4) {
+        if (daysInactive >= STALE_DAYS_THRESHOLD) {
           staleIssues.push({
             id: issue.id,
             key: issue.key,
@@ -925,7 +937,7 @@ resolver.define('getProjectAnalytics', async (req) => {
     completedStoryPoints = Math.round(completedStoryPoints * 10) / 10;
     const remainingStoryPoints = Math.round((totalStoryPoints - completedStoryPoints) * 10) / 10;
 
-    // Format Hours
+    // Format Hours (rounded once from total seconds)
     const totalEstimatedHours = Math.round((totalEstimatedSeconds / 3600) * 10) / 10;
     const totalLoggedHours = Math.round((totalLoggedSeconds / 3600) * 10) / 10;
     const totalRemainingHours = Math.round((totalRemainingSeconds / 3600) * 10) / 10;
@@ -936,43 +948,46 @@ resolver.define('getProjectAnalytics', async (req) => {
         ? Math.round((totalCycleTimeMs / (cycleTimeSampleCount * 1000 * 60 * 60 * 24)) * 10) / 10
         : null;
 
-    // Format Team Members list with both capacity statuses (Points and Hours)
+    // Format Team Members list with capacity statuses
     const teamMembers = Object.values(assigneeMap).map((m) => {
-      // Points-based capacity
+      const estimatedHours = Math.round((m.estSeconds / 3600) * 10) / 10;
+      const loggedHours = Math.round((m.spentSeconds / 3600) * 10) / 10;
+      const remainingHours = Math.round((m.remSeconds / 3600) * 10) / 10;
+
       let capacityStatusPoints = 'Optimal';
       if (m.remainingPoints > 20 || m.totalPoints > 30) {
         capacityStatusPoints = 'Heavy';
       } else if (m.totalPoints === 0 && m.totalIssues > 0) {
         capacityStatusPoints = 'Unestimated';
-      } else if (m.totalIssues === 0) {
-        capacityStatusPoints = 'Available';
       }
 
-      // Hours-based capacity
       let capacityStatusHours = 'Optimal';
-      if (m.estimatedHours > 40) {
+      if (estimatedHours > 40) {
         capacityStatusHours = 'Heavy';
-      } else if (m.estimatedHours === 0 && m.totalIssues > 0) {
+      } else if (estimatedHours === 0 && m.totalIssues > 0) {
         capacityStatusHours = 'Unestimated';
-      } else if (m.totalIssues === 0) {
-        capacityStatusHours = 'Available';
       }
 
       return {
-        ...m,
+        name: m.name,
+        accountId: m.accountId,
+        avatarUrl: m.avatarUrl,
+        totalIssues: m.totalIssues,
+        completedIssues: m.completedIssues,
+        inProgressIssues: m.inProgressIssues,
+        toDoIssues: m.toDoIssues,
         totalPoints: Math.round(m.totalPoints * 10) / 10,
         completedPoints: Math.round(m.completedPoints * 10) / 10,
         remainingPoints: Math.round(m.remainingPoints * 10) / 10,
-        estimatedHours: Math.round(m.estimatedHours * 10) / 10,
-        loggedHours: Math.round(m.loggedHours * 10) / 10,
-        remainingHours: Math.round(m.remainingHours * 10) / 10,
+        estimatedHours,
+        loggedHours,
+        remainingHours,
         completionRate: m.totalIssues > 0 ? Math.round((m.completedIssues / m.totalIssues) * 100) : 0,
         capacityStatusPoints,
         capacityStatusHours,
       };
     });
 
-    // Sort assignees by total issues descending
     teamMembers.sort((a, b) => b.totalIssues - a.totalIssues);
 
     const typeChartData = Object.keys(typeMap).map((name) => ({
@@ -992,73 +1007,54 @@ resolver.define('getProjectAnalytics', async (req) => {
       value: priorityMap[name],
     }));
 
-    // Sort stale issues by days inactive descending
     staleIssues.sort((a, b) => b.daysInactive - a.daysInactive);
 
-    // Top recent issues sample for drill-down table with both Points and Hours
+    // Normalized rawIssues for frontend consumption
     const rawIssues = issues.map((issue) => {
-      const issuePoints = extractStoryPoints(issue.fields, storyPointFieldIds);
-      const estSec = issue.fields?.timetracking?.originalEstimateSeconds || issue.fields?.timeestimate || 0;
-      const spentSec = issue.fields?.timetracking?.timeSpentSeconds || issue.fields?.timespent || 0;
+      const fields = issue.fields || {};
+      const issuePoints = extractStoryPoints(fields, storyPointFieldIds);
+      const estSec = fields.timetracking?.originalEstimateSeconds || 0;
+      const spentSec = fields.timetracking?.timeSpentSeconds || fields.timespent || 0;
 
-      const isDone = issue.fields?.status?.statusCategory?.key === 'done' || !!issue.fields?.resolutiondate;
-      const isInProgress = issue.fields?.status?.statusCategory?.key === 'indeterminate';
-      const updatedMs = issue.fields?.updated ? new Date(issue.fields.updated).getTime() : now;
+      const statusCategory = fields.status?.statusCategory?.key || 'new';
+      const isDone = statusCategory === 'done';
+      const isInProgress = statusCategory === 'indeterminate';
+      const statusBucket = isDone ? 'Done' : isInProgress ? 'In Progress' : 'To Do';
+      const typeName = fields.issuetype?.name || 'Task';
+      const isBug = BUG_TYPE_REGEX.test(typeName);
+
+      const updatedMs = fields.updated ? new Date(fields.updated).getTime() : now;
       const daysInactive = Math.floor((now - updatedMs) / (1000 * 60 * 60 * 24));
-      const isStale = (isInProgress || !isDone) && daysInactive >= 3;
+      const isStale = !isDone && daysInactive >= STALE_DAYS_THRESHOLD;
 
       return {
         id: issue.id,
         key: issue.key,
-        summary: issue.fields?.summary || '',
-        type: issue.fields?.issuetype?.name || 'Task',
-        status: issue.fields?.status?.name || '',
-        statusCategory: issue.fields?.status?.statusCategory?.key || 'new',
-        priority: issue.fields?.priority?.name || 'Medium',
-        assignee: issue.fields?.assignee?.displayName || 'Unassigned',
-        avatarUrl: issue.fields?.assignee?.avatarUrls
-          ? (issue.fields.assignee.avatarUrls['32x32'] ||
-             issue.fields.assignee.avatarUrls['24x24'] ||
-             issue.fields.assignee.avatarUrls['48x48'] ||
-             issue.fields.assignee.avatarUrls['16x16'])
+        summary: fields.summary || '',
+        type: typeName,
+        isBug,
+        status: fields.status?.name || '',
+        statusCategory,
+        statusBucket,
+        priority: fields.priority?.name || 'Unprioritized',
+        assignee: fields.assignee?.displayName || 'Unassigned',
+        accountId: fields.assignee?.accountId || null,
+        avatarUrl: fields.assignee?.avatarUrls
+          ? fields.assignee.avatarUrls['32x32'] ||
+            fields.assignee.avatarUrls['24x24'] ||
+            fields.assignee.avatarUrls['48x48'] ||
+            fields.assignee.avatarUrls['16x16']
           : null,
         storyPoints: issuePoints,
         estimatedHours: Math.round((estSec / 3600) * 10) / 10,
         loggedHours: Math.round((spentSec / 3600) * 10) / 10,
-        created: issue.fields?.created,
-        resolutiondate: issue.fields?.resolutiondate,
-        updated: issue.fields?.updated,
+        created: fields.created,
+        resolutiondate: fields.resolutiondate,
+        updated: fields.updated,
         daysInactive,
         isStale,
       };
     });
-
-    const recentIssues = rawIssues.slice(0, 20);
-
-    // Executive summaries for both modes
-    const executiveSummaryPoints = `### 📊 Agile Pulse Brief (Story Points): ${projectKey}
-* **Applied JQL:** \`${jql}\`
-* **Progress:** ${completedCount}/${totalIssues} issues completed (**${completionRate}%**)
-* **Velocity & Story Points:** **${totalStoryPoints} SP** total | **${completedStoryPoints} SP** completed | **${remainingStoryPoints} SP** remaining
-* **Flow & Speed:** Average Cycle Time: **${avgCycleTimeDays !== null ? `${avgCycleTimeDays} days` : 'N/A'}**
-* **Quality Health:** Bug Ratio: **${bugRatio}%** (${bugCount} bugs out of ${totalIssues} tickets)
-* **Risk & Action Items:**
-  ${staleIssues.length > 0 ? `- ⚠️ **${staleIssues.length} stale tickets** inactive for ≥ 4 days.` : '- ✅ No stale tickets detected.'}
-  ${unassignedCount > 0 ? `- 👤 **${unassignedCount} unassigned issues** need owner.` : '- ✅ All active issues assigned.'}
-  ${unestimatedPointsCount > 0 ? `- 🎯 **${unestimatedPointsCount} issues missing Story Points**.` : '- ✅ All issues estimated with Story Points.'}
-`;
-
-    const executiveSummaryHours = `### 📊 Agile Pulse Brief (Hours): ${projectKey}
-* **Applied JQL:** \`${jql}\`
-* **Progress:** ${completedCount}/${totalIssues} issues completed (**${completionRate}%**)
-* **Effort & Hours:** **${totalEstimatedHours}h** estimated | **${totalLoggedHours}h** logged | **${totalRemainingHours}h** remaining
-* **Flow & Speed:** Average Cycle Time: **${avgCycleTimeDays !== null ? `${avgCycleTimeDays} days` : 'N/A'}**
-* **Quality Health:** Bug Ratio: **${bugRatio}%** (${bugCount} bugs out of ${totalIssues} tickets)
-* **Risk & Action Items:**
-  ${staleIssues.length > 0 ? `- ⚠️ **${staleIssues.length} stale tickets** inactive for ≥ 4 days.` : '- ✅ No stale tickets detected.'}
-  ${unassignedCount > 0 ? `- 👤 **${unassignedCount} unassigned issues** need owner.` : '- ✅ All active issues assigned.'}
-  ${unestimatedHoursCount > 0 ? `- ⏱️ **${unestimatedHoursCount} issues missing hour estimates**.` : '- ✅ All issues estimated.'}
-`;
 
     return {
       success: true,
@@ -1079,19 +1075,16 @@ resolver.define('getProjectAnalytics', async (req) => {
         inProgressCount,
         toDoCount,
         completionRate,
-        // Story Points KPIs
         totalStoryPoints,
         completedStoryPoints,
         inProgressStoryPoints: Math.round(inProgressStoryPoints * 10) / 10,
         toDoStoryPoints: Math.round(toDoStoryPoints * 10) / 10,
         remainingStoryPoints,
         unestimatedPointsCount,
-        // Hours KPIs
         totalEstimatedHours,
         totalLoggedHours,
         totalRemainingHours,
         unestimatedHoursCount,
-        // Common Quality & Risk KPIs
         bugRatio,
         bugCount,
         avgCycleTimeDays,
@@ -1105,10 +1098,7 @@ resolver.define('getProjectAnalytics', async (req) => {
       },
       teamMembers,
       staleIssues,
-      recentIssues,
       rawIssues,
-      executiveSummaryPoints,
-      executiveSummaryHours,
     };
   } catch (err) {
     return {
@@ -1120,35 +1110,52 @@ resolver.define('getProjectAnalytics', async (req) => {
 
 /**
  * Resolver: updateIssueStatus
- * Transitions an issue to a new status (e.g. In Progress, Done, To Do)
+ * Transitions an issue to a new status strictly using the caller's permissions (`asUser()`).
  */
 resolver.define('updateIssueStatus', async (req) => {
-  const { issueKey, statusName } = req.payload || {};
-  if (!issueKey || !statusName) {
-    return { success: false, error: 'Issue key and statusName are required' };
+  const { issueKey: rawKey, statusName, transitionId } = req.payload || {};
+  if (!rawKey || (!statusName && !transitionId)) {
+    return { success: false, error: 'Issue key and target status are required.' };
   }
 
   try {
+    const issueKey = assertIssueKey(rawKey);
     const transitionsData = await fetchJira(route`/rest/api/3/issue/${issueKey}/transitions`);
     const transitions = transitionsData.transitions || [];
 
-    const targetLower = statusName.toLowerCase();
-    let matchedTransition = transitions.find(
-      (t) => (t.name || '').toLowerCase() === targetLower || (t.to?.name || '').toLowerCase() === targetLower
-    );
+    let matchedTransition = null;
+    if (transitionId) {
+      matchedTransition = transitions.find((t) => String(t.id) === String(transitionId));
+    }
 
-    if (!matchedTransition) {
+    if (!matchedTransition && statusName) {
+      const targetLower = String(statusName).trim().toLowerCase();
+      // Exact match on target status name or transition name (never fuzzy substring matching)
       matchedTransition = transitions.find(
         (t) =>
-          (t.name || '').toLowerCase().includes(targetLower) ||
-          (t.to?.name || '').toLowerCase().includes(targetLower)
+          (t.to?.name || '').toLowerCase() === targetLower ||
+          (t.name || '').toLowerCase() === targetLower
       );
+      // Secondary match on statusCategory key if user picked a bucket ('Done', 'In Progress', 'To Do')
+      if (!matchedTransition) {
+        const bucketToCategory = {
+          done: 'done',
+          'in progress': 'indeterminate',
+          'to do': 'new',
+        };
+        const wantedCat = bucketToCategory[targetLower];
+        if (wantedCat) {
+          matchedTransition = transitions.find(
+            (t) => (t.to?.statusCategory?.key || '').toLowerCase() === wantedCat
+          );
+        }
+      }
     }
 
     if (!matchedTransition) {
       return {
         success: false,
-        error: `No transition found to "${statusName}". Available: ${transitions.map((t) => t.name).join(', ')}`,
+        error: `No workflow transition available to "${statusName}".`,
       };
     }
 
@@ -1158,7 +1165,12 @@ resolver.define('updateIssueStatus', async (req) => {
       body: JSON.stringify({ transition: { id: matchedTransition.id } }),
     });
 
-    return { success: true, issueKey, newStatus: matchedTransition.to?.name || statusName };
+    return {
+      success: true,
+      issueKey,
+      newStatus: matchedTransition.to?.name || statusName,
+      newStatusCategory: matchedTransition.to?.statusCategory?.key || null,
+    };
   } catch (err) {
     return { success: false, error: err.message };
   }
@@ -1166,26 +1178,52 @@ resolver.define('updateIssueStatus', async (req) => {
 
 /**
  * Resolver: updateIssueAssignee
- * Reassigns an issue to a given user
+ * Reassigns an issue to a given user strictly using the caller's permissions (`asUser()`).
  */
 resolver.define('updateIssueAssignee', async (req) => {
-  const { issueKey, assigneeName, accountId } = req.payload || {};
-  if (!issueKey) {
-    return { success: false, error: 'Issue key is required' };
+  const { issueKey: rawKey, assigneeName, accountId } = req.payload || {};
+  if (!rawKey) {
+    return { success: false, error: 'Issue key is required.' };
   }
 
   try {
+    const issueKey = assertIssueKey(rawKey);
     let targetAccountId = accountId;
+    let resolvedDisplayName = assigneeName || 'Unassigned';
+    let resolvedAvatarUrl = null;
 
-    if (!targetAccountId && assigneeName) {
-      if (assigneeName.toLowerCase() === 'unassigned') {
-        targetAccountId = null;
-      } else {
-        const users = await fetchJira(route`/rest/api/3/user/search?query=${encodeURIComponent(assigneeName)}`);
-        if (Array.isArray(users) && users.length > 0) {
-          targetAccountId = users[0].accountId;
-        }
+    const isUnassign =
+      accountId === null ||
+      (typeof assigneeName === 'string' && assigneeName.trim().toLowerCase() === 'unassigned');
+
+    if (isUnassign) {
+      targetAccountId = null;
+      resolvedDisplayName = 'Unassigned';
+    } else if (!targetAccountId && assigneeName) {
+      const cleanName = String(assigneeName).trim();
+      // Do NOT wrap in encodeURIComponent inside `route` template (route already encodes)
+      const users = await fetchJira(route`/rest/api/3/user/search?query=${cleanName}`);
+      if (!Array.isArray(users) || users.length === 0) {
+        return {
+          success: false,
+          error: `Could not find Jira user matching "${cleanName}".`,
+        };
       }
+      const exactUser =
+        users.find((u) => (u.displayName || '').toLowerCase() === cleanName.toLowerCase()) ||
+        users[0];
+      targetAccountId = exactUser.accountId;
+      resolvedDisplayName = exactUser.displayName || cleanName;
+      resolvedAvatarUrl = exactUser.avatarUrls
+        ? exactUser.avatarUrls['32x32'] || exactUser.avatarUrls['24x24']
+        : null;
+    }
+
+    if (!isUnassign && !targetAccountId) {
+      return {
+        success: false,
+        error: 'A valid user accountId or assigneeName is required.',
+      };
     }
 
     await fetchJira(route`/rest/api/3/issue/${issueKey}/assignee`, {
@@ -1194,7 +1232,13 @@ resolver.define('updateIssueAssignee', async (req) => {
       body: JSON.stringify({ accountId: targetAccountId }),
     });
 
-    return { success: true, issueKey, assignee: assigneeName };
+    return {
+      success: true,
+      issueKey,
+      assignee: resolvedDisplayName,
+      accountId: targetAccountId,
+      avatarUrl: resolvedAvatarUrl,
+    };
   } catch (err) {
     return { success: false, error: err.message };
   }

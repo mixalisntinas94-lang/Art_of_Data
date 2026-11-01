@@ -28,6 +28,28 @@ import {
 } from 'lucide-react';
 
 /**
+ * Escapes untrusted strings for safe interpolation into ECharts HTML tooltips (prevents DOM XSS).
+ */
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/**
+ * Sanitizes a cell value for CSV export to prevent Spreadsheet Formula Injection (=, +, -, @, \t, \r)
+ * and properly escapes embedded double quotes.
+ */
+function sanitizeCsvCell(value) {
+  const raw = String(value ?? '');
+  const defused = /^[=+\-@\t\r]/.test(raw) ? `'${raw}` : raw;
+  return `"${defused.replace(/"/g, '""')}"`;
+}
+
+/**
  * Safe dimension value extractor
  */
 export function getIssueDimValue(issue, dim) {
@@ -113,16 +135,26 @@ export default function ChartWidget({
     setCrossFilter,
   } = useFilterStore();
 
-  // Close hover / click menu on click outside
+  // Close hover / click menu on click outside or Escape key (only bound while menuOpen is true)
   React.useEffect(() => {
+    if (!menuOpen) return undefined;
     function handleClickOutside(e) {
       if (menuRef.current && !menuRef.current.contains(e.target)) {
         setMenuOpen(false);
       }
     }
+    function handleKeyDown(e) {
+      if (e.key === 'Escape') {
+        setMenuOpen(false);
+      }
+    }
     document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, []);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [menuOpen]);
 
   const {
     title = 'Custom Chart',
@@ -230,7 +262,13 @@ export default function ChartWidget({
           backgroundColor: '#0f172a',
           borderColor: '#334155',
           textStyle: { color: '#f8fafc', fontSize: 12 },
-          formatter: `{b}: <strong style="color:#38bdf8">{c}</strong> ({d}%)<br/><span style="font-size:10px;color:#94a3b8">Click slice to cross-filter</span>`,
+          formatter: (p) => {
+            if (!p) return '';
+            const safeName = escapeHtml(p.name);
+            const safeVal = escapeHtml(p.value);
+            const safePct = escapeHtml(p.percent ?? 0);
+            return `${safeName}: <strong style="color:#38bdf8">${safeVal}</strong> (${safePct}%)<br/><span style="font-size:10px;color:#94a3b8">Click slice to cross-filter</span>`;
+          },
         },
         legend: showLegend
           ? {
@@ -422,7 +460,10 @@ export default function ChartWidget({
         formatter: (params) => {
           if (!params || !params[0]) return '';
           const p = params[0];
-          return `<strong>${p.name}</strong><br/>${measureLabel}: <span style="color:#38bdf8;font-weight:bold">${p.value}</span><br/><span style="font-size:10px;color:#94a3b8">Click bar to cross-filter</span>`;
+          const safeName = escapeHtml(p.name);
+          const safeMeasure = escapeHtml(measureLabel);
+          const safeVal = escapeHtml(p.value);
+          return `<strong>${safeName}</strong><br/>${safeMeasure}: <span style="color:#38bdf8;font-weight:bold">${safeVal}</span><br/><span style="font-size:10px;color:#94a3b8">Click bar to cross-filter</span>`;
         },
       },
       dataZoom: dataZoomConfig,
@@ -509,7 +550,10 @@ export default function ChartWidget({
       const cols = Array.from(colSet);
       const rows = Array.from(rowSet);
 
-      let csv = `"${rowDim} / ${colDim}",` + cols.map((c) => `"${c}"`).join(',') + ',"Total"\n';
+      let csv =
+        `${sanitizeCsvCell(`${rowDim} / ${colDim}`)},` +
+        cols.map((c) => sanitizeCsvCell(c)).join(',') +
+        ',"Total"\n';
       rows.forEach((r) => {
         let rTotal = 0;
         const rowVals = cols.map((c) => {
@@ -517,7 +561,7 @@ export default function ChartWidget({
           rTotal += v;
           return v;
         });
-        csv += `"${r}",` + rowVals.join(',') + `,${Math.round(rTotal * 10) / 10}\n`;
+        csv += `${sanitizeCsvCell(r)},` + rowVals.join(',') + `,${Math.round(rTotal * 10) / 10}\n`;
       });
 
       const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
@@ -531,9 +575,9 @@ export default function ChartWidget({
       return;
     }
 
-    const csvHeader = `${groupBy},${measure}\n`;
+    const csvHeader = `${sanitizeCsvCell(groupBy)},${sanitizeCsvCell(measure)}\n`;
     const csvRows = categories
-      .map((cat, i) => `"${cat}",${values[i]}`)
+      .map((cat, i) => `${sanitizeCsvCell(cat)},${values[i]}`)
       .join('\n');
     const blob = new Blob([csvHeader + csvRows], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);

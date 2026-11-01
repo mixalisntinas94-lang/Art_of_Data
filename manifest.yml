@@ -29,7 +29,10 @@ app:
 permissions:
   scopes:
     - 'read:jira-work'
+    - 'write:jira-work'
     - 'read:jira-user'
   content:
+    # Required for ECharts canvas/SVG inline style attributes and react-grid-layout positioning.
+    # Zero external egress is configured — all data remains strictly within Atlassian Cloud.
     styles:
       - 'unsafe-inline'
