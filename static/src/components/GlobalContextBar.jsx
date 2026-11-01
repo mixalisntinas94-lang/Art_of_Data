@@ -1,15 +1,16 @@
 import React from 'react';
-import { Zap, Layers, Briefcase, ChevronRight, Sparkles, LayoutGrid } from 'lucide-react';
+import { Zap, Layers, Briefcase, ChevronRight, Sparkles, LayoutGrid, Inbox, Target } from 'lucide-react';
 import { useFilterStore } from '../store/useFilterStore';
 
 /**
  * Global Context Bar - Executive Routing & Scope Selector
  *
- * Provides Context Switching across 4 enterprise levels:
+ * Provides Context Switching across enterprise levels:
  * 1. Active Sprint (Tactical Delivery Engine - Current Active Scope)
- * 2. Custom Explorer (Self-Service Analytics Builder & Drag & Drop BI Canvas)
- * 3. Project / Release (Release & Milestones Planning - Coming Soon)
- * 4. Portfolio / Company (C-Level Executive Strategy - Coming Soon)
+ * 2. Backlog Analysis (Grooming, Refinement & Readiness)
+ * 3. Epic Analysis (Strategic Roadmap & Progress Delivery)
+ * 4. Custom Explorer (Self-Service Analytics Builder & Drag & Drop BI Canvas)
+ * 5. Portfolio / Company (C-Level Executive Strategy - Coming Soon)
  */
 export default function GlobalContextBar({ projectKey, activeSprintName }) {
   const { currentScope, setCurrentScope } = useFilterStore();
@@ -23,20 +24,28 @@ export default function GlobalContextBar({ projectKey, activeSprintName }) {
       description: 'Sprint health, velocity, blockers & daily team flow',
     },
     {
+      id: 'backlog',
+      label: 'Backlog Analysis',
+      icon: Inbox,
+      enabled: true,
+      badge: 'Hygiene',
+      description: 'Backlog readiness, grooming coverage, rot & age distribution',
+    },
+    {
+      id: 'epic',
+      label: 'Epic Analysis',
+      icon: Target,
+      enabled: true,
+      badge: 'Roadmap',
+      description: 'Strategic epic progress, delivery confidence & orphan tickets',
+    },
+    {
       id: 'explorer',
       label: 'Custom Explorer',
       icon: LayoutGrid,
       enabled: true,
       badge: 'BI Studio',
       description: 'Self-service drag & drop BI canvas with Apache ECharts',
-    },
-    {
-      id: 'project',
-      label: 'Project / Release',
-      icon: Layers,
-      enabled: false,
-      badge: 'Coming Soon',
-      description: 'Epic progress, release forecast & milestone delivery',
     },
     {
       id: 'portfolio',
@@ -97,10 +106,22 @@ export default function GlobalContextBar({ projectKey, activeSprintName }) {
         <span className="text-white font-medium flex items-center gap-1.5">
           <span
             className={`w-2 h-2 rounded-full ${
-              currentScope === 'explorer' ? 'bg-cyan-400 shadow-cyan-400/80' : 'bg-emerald-400 shadow-emerald-400/80'
+              currentScope === 'explorer'
+                ? 'bg-cyan-400 shadow-cyan-400/80'
+                : currentScope === 'backlog'
+                ? 'bg-amber-400 shadow-amber-400/80'
+                : currentScope === 'epic'
+                ? 'bg-indigo-400 shadow-indigo-400/80'
+                : 'bg-emerald-400 shadow-emerald-400/80'
             } shadow-sm`}
           />
-          {currentScope === 'explorer' ? 'Custom Report Builder' : activeSprintName || 'Active Sprint View'}
+          {currentScope === 'explorer'
+            ? 'Custom BI Studio'
+            : currentScope === 'backlog'
+            ? 'Backlog Grooming & Health'
+            : currentScope === 'epic'
+            ? 'Strategic Epics & Roadmap'
+            : activeSprintName || 'Active Sprint View'}
         </span>
       </div>
     </div>

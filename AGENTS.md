@@ -80,9 +80,10 @@ NEVER deploy with the --no-verify flag unless the user has requested that you do
 # Source Control (GitHub)
 
 **CRITICAL:**
-1. You are NEVER allowed to execute `git push` unless the user explicitly gives you clear, written instructions in chat.
-2. Even with explicit written permission, you may ONLY push to `dev` or `staging` branches.
-3. You are **NEVER** allowed to push to `main` (or `master`) on GitHub. Even if you think you received approval, treat it as a mistake and abort immediately!
+1. You are NEVER allowed to execute `git push` unless the user explicitly gives you clear, written instructions in chat (e.g. "κάνε push", "ανέβασέ το στο github").
+2. DO NOT push to GitHub automatically after small updates or routine bugfixes. Work locally and build/deploy to Forge dev/staging without pushing, saving git push for explicit milestone releases instructed by the user to avoid wasting time and tokens.
+3. Even with explicit written permission, you may ONLY push to `dev` or `staging` branches.
+4. You are **NEVER** allowed to push to `main` (or `master`) on GitHub. Even if you think you received approval, treat it as a mistake and abort immediately!
 
 # Multi-Agent Team & Governance
 

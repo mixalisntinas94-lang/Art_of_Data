@@ -11,6 +11,8 @@ import { useFilterStore } from './store/useFilterStore';
 import GlobalContextBar from './components/GlobalContextBar';
 import SprintView from './views/SprintView';
 import CustomExplorerView from './views/CustomExplorerView';
+import BacklogAnalysisView from './views/BacklogAnalysisView';
+import EpicAnalysisView from './views/EpicAnalysisView';
 import ProjectReleaseView from './views/ProjectReleaseView';
 import PortfolioCompanyView from './views/PortfolioCompanyView';
 import ErrorBoundary from './components/ErrorBoundary';
@@ -99,14 +101,15 @@ export default function App() {
     [resetFilters]
   );
 
-  // Auto-switch default scope when switching between Sprint View and Custom Explorer
+  // Auto-switch default scope when switching between Sprint View and Project/Backlog/Epic/Explorer views
   const prevScopeRef = useRef(currentScope);
   useEffect(() => {
     if (prevScopeRef.current !== currentScope) {
       const prev = prevScopeRef.current;
       prevScopeRef.current = currentScope;
 
-      if (currentScope === 'explorer' && sprintScopeRef.current === 'active') {
+      const needsFullProjectScope = ['explorer', 'backlog', 'epic'].includes(currentScope);
+      if (needsFullProjectScope && sprintScopeRef.current === 'active') {
         setSprintScope('all');
         if (selectedProject) {
           loadProjectAnalytics(selectedProject.key, { sprint: 'all' });
@@ -672,6 +675,28 @@ export default function App() {
               activeSprintStartDate={analytics?.activeSprintStartDate}
               activeSprintEndDate={analytics?.activeSprintEndDate}
             />
+          )}
+
+          {currentScope === 'backlog' && (
+            <ErrorBoundary title="Backlog Analysis Error">
+              <BacklogAnalysisView
+                analytics={analytics}
+                allIssues={allIssues}
+                onUpdateIssue={handleUpdateIssue}
+                projectKey={selectedProject?.key}
+              />
+            </ErrorBoundary>
+          )}
+
+          {currentScope === 'epic' && (
+            <ErrorBoundary title="Epic Analysis Error">
+              <EpicAnalysisView
+                analytics={analytics}
+                allIssues={allIssues}
+                onUpdateIssue={handleUpdateIssue}
+                projectKey={selectedProject?.key}
+              />
+            </ErrorBoundary>
           )}
 
           {currentScope === 'explorer' && (

@@ -711,6 +711,7 @@ resolver.define('getProjectAnalytics', async (req) => {
       'timetracking',
       'timeestimate',
       'timespent',
+      'parent',
       ...storyPointFieldIds,
       ...sprintFieldIds,
     ];
@@ -1009,6 +1010,24 @@ resolver.define('getProjectAnalytics', async (req) => {
 
     staleIssues.sort((a, b) => b.daysInactive - a.daysInactive);
 
+    // Epics map & Backlog accumulator
+    const epicsMap = new Map();
+    let orphanIssuesCount = 0;
+    let orphanIssuesPoints = 0;
+
+    let backlogTotalItems = 0;
+    let backlogTotalPoints = 0;
+    let backlogEstimatedCount = 0;
+    let backlogStaleCount60 = 0;
+    let backlogStaleCount90 = 0;
+    const backlogAgeBrackets = {
+      under30: 0,
+      days30to60: 0,
+      days60to90: 0,
+      over90: 0,
+    };
+    const backlogTypeMap = {};
+
     // Normalized rawIssues for frontend consumption
     const rawIssues = issues.map((issue) => {
       const fields = issue.fields || {};
@@ -1024,8 +1043,109 @@ resolver.define('getProjectAnalytics', async (req) => {
       const isBug = BUG_TYPE_REGEX.test(typeName);
 
       const updatedMs = fields.updated ? new Date(fields.updated).getTime() : now;
+      const createdMs = fields.created ? new Date(fields.created).getTime() : now;
       const daysInactive = Math.floor((now - updatedMs) / (1000 * 60 * 60 * 24));
+      const daysSinceCreation = Math.floor((now - createdMs) / (1000 * 60 * 60 * 24));
       const isStale = !isDone && daysInactive >= STALE_DAYS_THRESHOLD;
+
+      // Sprint associations on issue
+      const issueSprints = [];
+      let hasActiveSprint = false;
+      for (const fieldId of sprintFieldIds) {
+        const val = fields[fieldId];
+        const items = Array.isArray(val) ? val : val && typeof val === 'object' ? [val] : [];
+        for (const s of items) {
+          if (s && s.name) {
+            const state = (s.state || '').toLowerCase();
+            issueSprints.push({ name: s.name, state });
+            if (state === 'active') hasActiveSprint = true;
+          }
+        }
+      }
+      const isBacklog = issueSprints.length === 0;
+
+      // Parent & Epic association
+      const isEpic = typeName.toLowerCase() === 'epic';
+      const parentField = fields.parent;
+      const epicKey = isEpic ? issue.key : parentField?.key || null;
+      const epicSummary = isEpic
+        ? (fields.summary || issue.key)
+        : (parentField?.fields?.summary || parentField?.key || null);
+
+      const pointsNum = issuePoints || 0;
+
+      // Accumulate Epic aggregation
+      if (epicKey) {
+        if (!epicsMap.has(epicKey)) {
+          epicsMap.set(epicKey, {
+            key: epicKey,
+            summary: epicSummary || epicKey,
+            totalIssues: 0,
+            doneIssues: 0,
+            inProgressIssues: 0,
+            toDoIssues: 0,
+            totalPoints: 0,
+            donePoints: 0,
+            inProgressPoints: 0,
+            toDoPoints: 0,
+            bugCount: 0,
+            contributors: new Set(),
+            childIssues: [],
+          });
+        }
+        const ep = epicsMap.get(epicKey);
+        if (epicSummary && ep.summary === epicKey) ep.summary = epicSummary;
+        if (!isEpic) {
+          ep.totalIssues += 1;
+          ep.totalPoints += pointsNum;
+          if (isDone) {
+            ep.doneIssues += 1;
+            ep.donePoints += pointsNum;
+          } else if (isInProgress) {
+            ep.inProgressIssues += 1;
+            ep.inProgressPoints += pointsNum;
+          } else {
+            ep.toDoIssues += 1;
+            ep.toDoPoints += pointsNum;
+          }
+          if (isBug) ep.bugCount += 1;
+          if (fields.assignee?.displayName) {
+            ep.contributors.add(fields.assignee.displayName);
+          }
+          ep.childIssues.push({
+            id: issue.id,
+            key: issue.key,
+            summary: fields.summary || '',
+            type: typeName,
+            status: fields.status?.name || '',
+            statusCategory,
+            assignee: fields.assignee?.displayName || 'Unassigned',
+            storyPoints: issuePoints,
+            isDone,
+          });
+        }
+      } else if (!isEpic) {
+        orphanIssuesCount += 1;
+        orphanIssuesPoints += pointsNum;
+      }
+
+      // Accumulate Backlog metrics (tickets not in any sprint and not done)
+      if (isBacklog && !isDone) {
+        backlogTotalItems += 1;
+        backlogTotalPoints += pointsNum;
+        if (issuePoints !== null && issuePoints !== undefined && issuePoints > 0) {
+          backlogEstimatedCount += 1;
+        }
+        if (daysInactive >= 60) backlogStaleCount60 += 1;
+        if (daysInactive >= 90) backlogStaleCount90 += 1;
+
+        if (daysSinceCreation < 30) backlogAgeBrackets.under30 += 1;
+        else if (daysSinceCreation < 60) backlogAgeBrackets.days30to60 += 1;
+        else if (daysSinceCreation < 90) backlogAgeBrackets.days60to90 += 1;
+        else backlogAgeBrackets.over90 += 1;
+
+        backlogTypeMap[typeName] = (backlogTypeMap[typeName] || 0) + 1;
+      }
 
       return {
         id: issue.id,
@@ -1052,9 +1172,69 @@ resolver.define('getProjectAnalytics', async (req) => {
         resolutiondate: fields.resolutiondate,
         updated: fields.updated,
         daysInactive,
+        daysSinceCreation,
         isStale,
+        sprints: issueSprints,
+        hasActiveSprint,
+        isBacklog,
+        isEpic,
+        epicKey,
+        epicSummary,
+        parent: parentField ? {
+          key: parentField.key,
+          summary: parentField.fields?.summary || parentField.key,
+          type: parentField.fields?.issuetype?.name || '',
+          status: parentField.fields?.status?.name || '',
+        } : null,
       };
     });
+
+    // Format Epics summary array
+    const epicsList = Array.from(epicsMap.values()).map((ep) => {
+      const compRate = ep.totalIssues > 0 ? Math.round((ep.doneIssues / ep.totalIssues) * 100) : 0;
+      const spCompRate = ep.totalPoints > 0 ? Math.round((ep.donePoints / ep.totalPoints) * 100) : compRate;
+      const isAtRisk = ep.bugCount >= 3 || (ep.inProgressIssues > 5 && compRate < 30);
+      return {
+        key: ep.key,
+        summary: ep.summary,
+        totalIssues: ep.totalIssues,
+        doneIssues: ep.doneIssues,
+        inProgressIssues: ep.inProgressIssues,
+        toDoIssues: ep.toDoIssues,
+        totalPoints: Math.round(ep.totalPoints * 10) / 10,
+        donePoints: Math.round(ep.donePoints * 10) / 10,
+        inProgressPoints: Math.round(ep.inProgressPoints * 10) / 10,
+        toDoPoints: Math.round(ep.toDoPoints * 10) / 10,
+        completionRate: compRate,
+        spCompletionRate: spCompRate,
+        isAtRisk,
+        bugCount: ep.bugCount,
+        contributorsCount: ep.contributors.size,
+        contributors: Array.from(ep.contributors),
+        childIssues: ep.childIssues,
+      };
+    });
+    epicsList.sort((a, b) => b.totalPoints - a.totalPoints || b.totalIssues - a.totalIssues);
+
+    const backlogReadinessScore =
+      backlogTotalItems > 0 ? Math.round((backlogEstimatedCount / backlogTotalItems) * 100) : 100;
+
+    const backlogTypeChartData = Object.keys(backlogTypeMap).map((name) => ({
+      name,
+      value: backlogTypeMap[name],
+    }));
+
+    const backlogSummary = {
+      totalItems: backlogTotalItems,
+      totalPoints: Math.round(backlogTotalPoints * 10) / 10,
+      estimatedCount: backlogEstimatedCount,
+      unestimatedCount: backlogTotalItems - backlogEstimatedCount,
+      readinessScore: backlogReadinessScore,
+      staleCount60: backlogStaleCount60,
+      staleCount90: backlogStaleCount90,
+      ageBrackets: backlogAgeBrackets,
+      typeBreakdown: backlogTypeChartData,
+    };
 
     return {
       success: true,
@@ -1099,6 +1279,10 @@ resolver.define('getProjectAnalytics', async (req) => {
       teamMembers,
       staleIssues,
       rawIssues,
+      epics: epicsList,
+      orphanIssuesCount,
+      orphanIssuesPoints: Math.round(orphanIssuesPoints * 10) / 10,
+      backlog: backlogSummary,
     };
   } catch (err) {
     return {
