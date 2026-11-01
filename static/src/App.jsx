@@ -54,9 +54,14 @@ export default function App() {
   const isCrossFiltered = hasActiveFilters();
   const latestRequestIdRef = useRef(0);
 
+  // Scope / Sprint filter state: 'active' (Current Sprint), 'all' (Full Project Scope), 'backlog', or specific sprint name
+  const [sprintScope, setSprintScope] = useState(() => (currentScope === 'explorer' ? 'all' : 'active'));
+  const sprintScopeRef = useRef(sprintScope);
+  sprintScopeRef.current = sprintScope;
+
   // Load analytics for a specific project (race-condition safe via latestRequestIdRef)
   const loadProjectAnalytics = useCallback(
-    async (projectKey, { resetActiveFilters = false } = {}) => {
+    async (projectKey, { resetActiveFilters = false, sprint = null } = {}) => {
       const reqId = ++latestRequestIdRef.current;
       try {
         setLoading(true);
@@ -65,9 +70,11 @@ export default function App() {
           resetFilters();
         }
 
+        const targetSprint = sprint !== null && sprint !== undefined ? sprint : sprintScopeRef.current;
+
         const res = await invoke('getProjectAnalytics', {
           projectKey,
-          sprint: 'active',
+          sprint: targetSprint,
         });
 
         // Ignore stale out-of-order responses
@@ -91,6 +98,27 @@ export default function App() {
     },
     [resetFilters]
   );
+
+  // Auto-switch default scope when switching between Sprint View and Custom Explorer
+  const prevScopeRef = useRef(currentScope);
+  useEffect(() => {
+    if (prevScopeRef.current !== currentScope) {
+      const prev = prevScopeRef.current;
+      prevScopeRef.current = currentScope;
+
+      if (currentScope === 'explorer' && sprintScopeRef.current === 'active') {
+        setSprintScope('all');
+        if (selectedProject) {
+          loadProjectAnalytics(selectedProject.key, { sprint: 'all' });
+        }
+      } else if (currentScope === 'sprint' && sprintScopeRef.current === 'all') {
+        setSprintScope('active');
+        if (selectedProject) {
+          loadProjectAnalytics(selectedProject.key, { sprint: 'active' });
+        }
+      }
+    }
+  }, [currentScope, selectedProject, loadProjectAnalytics]);
 
   // Fetch product context and Jira projects on mount (honouring projectPage context when present)
   useEffect(() => {
@@ -116,7 +144,9 @@ export default function App() {
             (targetKey && res.projects.find((p) => p.key === targetKey)) ||
             res.projects[0];
           setSelectedProject(initialProject);
-          await loadProjectAnalytics(initialProject.key, { resetActiveFilters: true });
+          const initialSprint = currentScope === 'explorer' ? 'all' : 'active';
+          setSprintScope(initialSprint);
+          await loadProjectAnalytics(initialProject.key, { resetActiveFilters: true, sprint: initialSprint });
         } else {
           setError(res?.error || 'No accessible Jira projects found.');
           setLoading(false);
@@ -416,6 +446,35 @@ export default function App() {
             </select>
           </div>
 
+          {/* Scope / Sprint Selector */}
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-medium text-slate-400">Scope:</span>
+            <select
+              value={sprintScope}
+              onChange={(e) => {
+                const newScope = e.target.value;
+                setSprintScope(newScope);
+                if (selectedProject) {
+                  loadProjectAnalytics(selectedProject.key, { sprint: newScope });
+                }
+              }}
+              className="bg-slate-900 border border-slate-700 text-xs text-slate-200 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500 font-medium"
+            >
+              <option value="active">⚡ Active Sprint (Current)</option>
+              <option value="all">🌐 All Project Scope (Full History)</option>
+              <option value="backlog">📦 Backlog Only (No Sprint)</option>
+              {Array.isArray(analytics?.detectedSprints) && analytics.detectedSprints.length > 0 && (
+                <optgroup label="Discovered Sprints">
+                  {analytics.detectedSprints.map((s) => (
+                    <option key={s.value || s.name} value={s.value || s.name}>
+                      {s.name} {s.state === 'active' ? '(Active)' : s.state === 'closed' ? '(Closed)' : s.state === 'future' ? '(Future)' : ''}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+            </select>
+          </div>
+
           {/* Metric Mode Toggle */}
           <div className="bg-slate-900 border border-slate-800 rounded-lg p-0.5 flex items-center text-xs font-medium">
             <button
@@ -542,18 +601,18 @@ export default function App() {
 
       {/* ── TRUNCATION OR SPRINT FALLBACK NOTICE ── */}
       {analytics && (analytics.isTruncated || analytics.sprintFallbackOccurred) && (
-        <div className="mt-3 px-3.5 py-2 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs flex items-center justify-between gap-2">
+        <div className="mt-3 px-3.5 py-2.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs flex items-center justify-between gap-2 shadow-sm">
           <div className="flex items-center gap-2">
             <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
             <span>
               {analytics.isTruncated && (
                 <>
-                  Showing first <strong>{allIssues.length}</strong> of{' '}
-                  <strong>{analytics.totalFound}</strong> matching issues.{' '}
+                  <strong className="font-semibold text-amber-200">Large Project Notice:</strong> Showing first <strong>{allIssues.length}</strong> of{' '}
+                  <strong>{analytics.totalFound}</strong> tickets. To analyze specific tickets or historical intervals, refine your scope using the Scope selector or cross-filters.
                 </>
               )}
               {analytics.sprintFallbackOccurred && (
-                <>No active sprint detected — displaying full project scope.</>
+                <>No active sprint detected in this project — displaying full project scope.</>
               )}
             </span>
           </div>
