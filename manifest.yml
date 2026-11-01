@@ -1,25 +1,21 @@
 modules:
   jira:globalPage:
     - key: art-of-data-hello-world-global-page
-      resource: main
+      resource: custom-ui-resource
       resolver:
         function: resolver-function
-      render: native
-      title: Agile Pulse (UI Kit)
-      layout: basic
+      title: Agile Pulse
   jira:projectPage:
     - key: agile-pulse-project-page
       resource: custom-ui-resource
       resolver:
         function: resolver-function
-      title: Agile Pulse (Custom UI Pro)
+      title: Agile Pulse
   function:
     - key: resolver-function
       handler: resolvers/index.handler
 
 resources:
-  - key: main
-    path: src/frontend/index.jsx
   - key: custom-ui-resource
     path: static/dist
 

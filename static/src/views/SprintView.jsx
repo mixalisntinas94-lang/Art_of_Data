@@ -278,21 +278,20 @@ export default function SprintView({
       <div className="p-4 rounded-xl bg-gradient-to-r from-slate-900 via-slate-900 to-indigo-950/40 border border-slate-800 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 shadow-sm">
         <div className="flex items-center gap-3">
           <span
-            className={`px-2.5 py-1 text-xs font-bold rounded-full uppercase tracking-wider ${
-              isBehindSchedule || kpis.bugRatio > 25
+            className={`px-2.5 py-1 text-xs font-bold rounded-full uppercase tracking-wider ${isBehindSchedule || kpis.bugRatio > 25
                 ? 'bg-rose-500/20 text-rose-400 border border-rose-500/30'
                 : isSlightlyBehind
-                ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
-                : 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
-            }`}
+                  ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
+                  : 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+              }`}
           >
             {isBehindSchedule
               ? '🔴 Critical Pacing Gap'
               : kpis.bugRatio > 25
-              ? '🔴 High Quality Risk'
-              : isSlightlyBehind
-              ? '🟡 Moderate Scope Delay'
-              : '🟢 Sprint On Track'}
+                ? '🔴 High Quality Risk'
+                : isSlightlyBehind
+                  ? '🟡 Moderate Scope Delay'
+                  : '🟢 Sprint On Track'}
           </span>
           <p className="text-xs text-slate-300">
             <strong className="text-white">Active Scope:</strong>{' '}
@@ -309,7 +308,7 @@ export default function SprintView({
 
       {/* ════ 2. HIGH-IMPACT TOP KPI HERO CARDS (WITH REAL PACING & CONDITIONAL THEME) ════ */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
-        
+
         {/* Card 1: Completion & Time-vs-Work Pacing */}
         <div className={`relative overflow-hidden p-4 rounded-xl bg-slate-900/90 border border-slate-800 border-t-2 ${completionTheme.topBorderClass} hover:border-slate-700 transition-all flex flex-col justify-between group shadow-sm`}>
           <div className={`absolute top-0 left-0 w-24 h-24 ${completionTheme.glowBgClass} rounded-full blur-xl pointer-events-none -translate-x-1/2 -translate-y-1/2`} />
@@ -480,7 +479,7 @@ export default function SprintView({
 
       {/* ════ 3. CHARTS ROW (STATUS DONUT & TYPES BAR CHART) ════ */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        
+
         {/* Widget 1: Status & Scope Breakdown (Donut with Neon Cyan Center) */}
         <div className="p-5 rounded-xl bg-slate-900/80 border border-slate-800 flex flex-col justify-between">
           <div>
@@ -489,11 +488,10 @@ export default function SprintView({
                 <BarChart3 className="w-4 h-4 text-blue-400" />
                 Status & Scope Breakdown
               </h3>
-              <span className={`text-xs font-semibold px-2.5 py-0.5 rounded-full border ${
-                isBehindSchedule
+              <span className={`text-xs font-semibold px-2.5 py-0.5 rounded-full border ${isBehindSchedule
                   ? 'text-rose-400 bg-rose-500/10 border-rose-500/20'
                   : 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20'
-              }`}>
+                }`}>
                 {kpis.completionRate}% Delivered
               </span>
             </div>
@@ -566,13 +564,12 @@ export default function SprintView({
               {/* Done Item */}
               <div
                 onClick={() => setSelectedStatus('Done')}
-                className={`flex items-center justify-between p-2.5 rounded-lg border transition-all cursor-pointer ${
-                  selectedStatus === 'Done'
+                className={`flex items-center justify-between p-2.5 rounded-lg border transition-all cursor-pointer ${selectedStatus === 'Done'
                     ? 'bg-emerald-500/20 border-emerald-500 shadow-[0_0_15px_rgba(16,185,129,0.25)]'
                     : selectedStatus
-                    ? 'bg-slate-800/30 border-slate-800/50 opacity-40 hover:opacity-100'
-                    : 'bg-slate-800/40 border-slate-800/80 hover:bg-slate-800/70'
-                }`}
+                      ? 'bg-slate-800/30 border-slate-800/50 opacity-40 hover:opacity-100'
+                      : 'bg-slate-800/40 border-slate-800/80 hover:bg-slate-800/70'
+                  }`}
               >
                 <div className="flex items-center gap-2">
                   <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 shadow-sm shadow-emerald-500/50" />
@@ -589,13 +586,12 @@ export default function SprintView({
               {/* In Progress Item */}
               <div
                 onClick={() => setSelectedStatus('In Progress')}
-                className={`flex items-center justify-between p-2.5 rounded-lg border transition-all cursor-pointer ${
-                  selectedStatus === 'In Progress'
+                className={`flex items-center justify-between p-2.5 rounded-lg border transition-all cursor-pointer ${selectedStatus === 'In Progress'
                     ? 'bg-blue-500/20 border-blue-500 shadow-[0_0_15px_rgba(59,130,246,0.25)]'
                     : selectedStatus
-                    ? 'bg-slate-800/30 border-slate-800/50 opacity-40 hover:opacity-100'
-                    : 'bg-slate-800/40 border-slate-800/80 hover:bg-slate-800/70'
-                }`}
+                      ? 'bg-slate-800/30 border-slate-800/50 opacity-40 hover:opacity-100'
+                      : 'bg-slate-800/40 border-slate-800/80 hover:bg-slate-800/70'
+                  }`}
               >
                 <div className="flex items-center gap-2">
                   <span className="w-2.5 h-2.5 rounded-full bg-blue-500 shadow-sm shadow-blue-500/50" />
@@ -614,13 +610,12 @@ export default function SprintView({
               {/* To Do Item */}
               <div
                 onClick={() => setSelectedStatus('To Do')}
-                className={`flex items-center justify-between p-2.5 rounded-lg border transition-all cursor-pointer ${
-                  selectedStatus === 'To Do'
+                className={`flex items-center justify-between p-2.5 rounded-lg border transition-all cursor-pointer ${selectedStatus === 'To Do'
                     ? 'bg-slate-700/40 border-slate-400 shadow-md'
                     : selectedStatus
-                    ? 'bg-slate-800/30 border-slate-800/50 opacity-40 hover:opacity-100'
-                    : 'bg-slate-800/40 border-slate-800/80 hover:bg-slate-800/70'
-                }`}
+                      ? 'bg-slate-800/30 border-slate-800/50 opacity-40 hover:opacity-100'
+                      : 'bg-slate-800/40 border-slate-800/80 hover:bg-slate-800/70'
+                  }`}
               >
                 <div className="flex items-center gap-2">
                   <span className="w-2.5 h-2.5 rounded-full bg-slate-500" />
@@ -641,9 +636,8 @@ export default function SprintView({
           {/* Dynamic Pacing Footer Check */}
           <div className="flex items-center justify-between text-xs text-slate-400 pt-3 border-t border-slate-800/60">
             <span>Pacing Status (Time vs Work)</span>
-            <span className={`font-semibold flex items-center gap-1 ${
-              isBehindSchedule ? 'text-rose-400' : isSlightlyBehind ? 'text-amber-400' : 'text-emerald-400'
-            }`}>
+            <span className={`font-semibold flex items-center gap-1 ${isBehindSchedule ? 'text-rose-400' : isSlightlyBehind ? 'text-amber-400' : 'text-emerald-400'
+              }`}>
               {isBehindSchedule ? '⚠️ Behind Schedule' : isSlightlyBehind ? '🟡 Slightly Behind' : '🟢 On Track'} ({kpis.completionRate}% Done / {sprintTimeElapsed}% Time)
             </span>
           </div>
@@ -668,7 +662,7 @@ export default function SprintView({
 
           {/* Grid: Bar Chart on Left + Category Insights Panel on Right */}
           <div className="grid grid-cols-1 md:grid-cols-12 gap-4 my-2 items-center">
-            
+
             {/* Left (7 cols): Glowing Gradient Bar Chart with Dimming */}
             <div className="md:col-span-7 h-64">
               <ResponsiveContainer width="100%" height="100%">
@@ -811,13 +805,12 @@ export default function SprintView({
                     <div
                       key={idx}
                       onClick={() => setSelectedType(cat.name)}
-                      className={`flex items-center justify-between text-xs py-1 px-2 rounded-lg border transition-all cursor-pointer ${
-                        isSelected
+                      className={`flex items-center justify-between text-xs py-1 px-2 rounded-lg border transition-all cursor-pointer ${isSelected
                           ? 'bg-purple-600/30 border-purple-400 shadow-[0_0_12px_rgba(168,85,247,0.3)]'
                           : isDimmed
-                          ? 'bg-slate-900/30 border-slate-800/40 opacity-40 hover:opacity-100'
-                          : 'bg-slate-900/40 border-slate-800/50 hover:bg-slate-800/60'
-                      }`}
+                            ? 'bg-slate-900/30 border-slate-800/40 opacity-40 hover:opacity-100'
+                            : 'bg-slate-900/40 border-slate-800/50 hover:bg-slate-800/60'
+                        }`}
                     >
                       <span className="text-slate-300 font-medium truncate max-w-[100px] flex items-center gap-1.5">
                         {catIcon && (
@@ -864,7 +857,7 @@ export default function SprintView({
 
       {/* ════ 4. EFFORT ALLOCATION & BLOCKERS STREAM ════ */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        
+
         {/* Left (7 cols): Horizontal Bar Chart with Slim Bars & 40 SP Capacity Limit */}
         <div className="lg:col-span-7 p-5 rounded-xl bg-slate-900/80 border border-slate-800 flex flex-col justify-between">
           <div>
@@ -1044,21 +1037,19 @@ export default function SprintView({
               <div className="bg-slate-950 border border-slate-800 rounded-lg p-0.5 flex items-center text-xs font-medium">
                 <button
                   onClick={() => setActivityFilter('all')}
-                  className={`px-2.5 py-1 rounded-md transition-all ${
-                    activityFilter === 'all'
+                  className={`px-2.5 py-1 rounded-md transition-all ${activityFilter === 'all'
                       ? 'bg-blue-600 text-white shadow-sm font-semibold'
                       : 'text-slate-400 hover:text-white'
-                  }`}
+                    }`}
                 >
                   All ({filteredIssues.length})
                 </button>
                 <button
                   onClick={() => setActivityFilter('stale')}
-                  className={`px-2.5 py-1 rounded-md transition-all flex items-center gap-1.5 ${
-                    activityFilter === 'stale'
+                  className={`px-2.5 py-1 rounded-md transition-all flex items-center gap-1.5 ${activityFilter === 'stale'
                       ? 'bg-amber-600 text-white shadow-sm font-semibold'
                       : 'text-amber-400/90 hover:text-amber-300'
-                  }`}
+                    }`}
                 >
                   <AlertTriangle className="w-3 h-3 text-amber-400" />
                   Blockers & Stale ({staleIssuesCount})
@@ -1074,20 +1065,18 @@ export default function SprintView({
                 return (
                   <div
                     key={issue.id}
-                    className={`p-2.5 rounded-xl border transition-all duration-200 group flex items-center justify-between cursor-pointer ${
-                      isStaleItem
+                    className={`p-2.5 rounded-xl border transition-all duration-200 group flex items-center justify-between cursor-pointer ${isStaleItem
                         ? 'border-amber-500/70 bg-amber-500/10 hover:bg-amber-500/20 shadow-[0_0_15px_rgba(245,158,11,0.15)]'
                         : 'border-transparent hover:border-blue-500/60 hover:bg-blue-600/20 hover:shadow-[0_0_20px_rgba(59,130,246,0.22)]'
-                    }`}
+                      }`}
                   >
                     <div className="flex items-center gap-2.5 min-w-0">
                       {/* Glowing Indicator Bar */}
                       <div
-                        className={`w-1.5 h-8 rounded-full transition-all shrink-0 ${
-                          isStaleItem
+                        className={`w-1.5 h-8 rounded-full transition-all shrink-0 ${isStaleItem
                             ? 'bg-amber-500 shadow-[0_0_8px_rgba(245,158,11,0.8)]'
                             : 'bg-slate-800 group-hover:bg-blue-400 group-hover:shadow-[0_0_12px_rgba(96,165,250,0.9)]'
-                        }`}
+                          }`}
                       />
 
                       {/* Real User Avatar from Jira */}
@@ -1105,9 +1094,8 @@ export default function SprintView({
                           />
                         ) : null}
                         <div
-                          className={`w-full h-full items-center justify-center text-[10px] font-bold text-white bg-gradient-to-br from-indigo-500 to-purple-600 ${
-                            issue.avatarUrl ? 'hidden' : 'flex'
-                          }`}
+                          className={`w-full h-full items-center justify-center text-[10px] font-bold text-white bg-gradient-to-br from-indigo-500 to-purple-600 ${issue.avatarUrl ? 'hidden' : 'flex'
+                            }`}
                         >
                           {issue.assignee ? issue.assignee.substring(0, 2).toUpperCase() : 'UN'}
                         </div>
@@ -1163,13 +1151,12 @@ export default function SprintView({
                       )}
 
                       <span
-                        className={`px-2 py-0.5 text-[11px] font-medium rounded-full ${
-                          issue.statusCategory === 'done'
+                        className={`px-2 py-0.5 text-[11px] font-medium rounded-full ${issue.statusCategory === 'done'
                             ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
                             : issue.statusCategory === 'indeterminate'
-                            ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30'
-                            : 'bg-slate-800 text-slate-400 border border-slate-700'
-                        }`}
+                              ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30'
+                              : 'bg-slate-800 text-slate-400 border border-slate-700'
+                          }`}
                       >
                         {issue.status}
                       </span>
