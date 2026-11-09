@@ -13,6 +13,7 @@ import SprintView from './views/SprintView';
 import CustomExplorerView from './views/CustomExplorerView';
 import BacklogAnalysisView from './views/BacklogAnalysisView';
 import EpicAnalysisView from './views/EpicAnalysisView';
+import HistoricalTrendsView from './views/HistoricalTrendsView';
 import ProjectReleaseView from './views/ProjectReleaseView';
 import PortfolioCompanyView from './views/PortfolioCompanyView';
 import ErrorBoundary from './components/ErrorBoundary';
@@ -807,6 +808,7 @@ export default function App() {
           <GlobalContextBar
             projectKey={selectedProject?.key}
             activeSprintName={analytics?.activeSprintName}
+            fifoCount={analytics?.fifoHistory?.usedCount}
           />
 
           {/* ════ 2. DYNAMIC COMPONENT RENDERING BASED ON CURRENT SCOPE ════ */}
@@ -872,6 +874,22 @@ export default function App() {
                 selectedProject={selectedProject}
                 metricMode={metricMode}
                 onUpdateIssue={handleUpdateIssue}
+              />
+            </ErrorBoundary>
+          )}
+
+          {currentScope === 'history' && (
+            <ErrorBoundary title="FIFO Historical Snapshot Vault Error">
+              <HistoricalTrendsView
+                analytics={analytics}
+                kpis={kpis}
+                projectKey={selectedProject?.key}
+                sprintScope={sprintScope}
+                onHistoryUpdated={(updatedFifoHistory) =>
+                  setAnalytics((prev) =>
+                    prev ? { ...prev, fifoHistory: updatedFifoHistory } : prev
+                  )
+                }
               />
             </ErrorBoundary>
           )}

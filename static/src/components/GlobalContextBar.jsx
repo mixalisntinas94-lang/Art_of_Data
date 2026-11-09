@@ -1,5 +1,5 @@
 import React from 'react';
-import { Zap, Layers, Briefcase, ChevronRight, Sparkles, LayoutGrid, Inbox, Target } from 'lucide-react';
+import { Zap, Layers, Briefcase, ChevronRight, Sparkles, LayoutGrid, Inbox, Target, History } from 'lucide-react';
 import { useFilterStore } from '../store/useFilterStore';
 
 /**
@@ -10,9 +10,10 @@ import { useFilterStore } from '../store/useFilterStore';
  * 2. Backlog Analysis (Grooming, Refinement & Readiness)
  * 3. Epic Analysis (Strategic Roadmap & Progress Delivery)
  * 4. Custom Explorer (Self-Service Analytics Builder & Drag & Drop BI Canvas)
- * 5. Portfolio / Company (C-Level Executive Strategy - Coming Soon)
+ * 5. Historical Vault (1-by-1 FIFO Rolling Snapshot Engine & Longitudinal Trends)
+ * 6. Portfolio / Company (C-Level Executive Strategy - Coming Soon)
  */
-export default function GlobalContextBar({ projectKey, activeSprintName }) {
+export default function GlobalContextBar({ projectKey, activeSprintName, fifoCount }) {
   const { currentScope, setCurrentScope } = useFilterStore();
 
   const scopes = [
@@ -46,6 +47,14 @@ export default function GlobalContextBar({ projectKey, activeSprintName }) {
       enabled: true,
       badge: 'BI Studio',
       description: 'Self-service drag & drop BI canvas with Apache ECharts',
+    },
+    {
+      id: 'history',
+      label: 'Historical Vault',
+      icon: History,
+      enabled: true,
+      badge: fifoCount !== undefined ? `FIFO ${fifoCount}/104` : 'FIFO',
+      description: '2-year rolling FIFO snapshot buffer & longitudinal velocity trends',
     },
     {
       id: 'portfolio',
@@ -112,6 +121,8 @@ export default function GlobalContextBar({ projectKey, activeSprintName }) {
                 ? 'bg-amber-400 shadow-amber-400/80'
                 : currentScope === 'epic'
                 ? 'bg-indigo-400 shadow-indigo-400/80'
+                : currentScope === 'history'
+                ? 'bg-purple-400 shadow-purple-400/80'
                 : 'bg-emerald-400 shadow-emerald-400/80'
             } shadow-sm`}
           />
@@ -121,6 +132,8 @@ export default function GlobalContextBar({ projectKey, activeSprintName }) {
             ? 'Backlog Grooming & Health'
             : currentScope === 'epic'
             ? 'Strategic Epics & Roadmap'
+            : currentScope === 'history'
+            ? 'FIFO Historical Snapshot Vault'
             : activeSprintName || 'Active Sprint View'}
         </span>
       </div>

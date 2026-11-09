@@ -10,6 +10,16 @@ const resolver = new Resolver();
 const STALE_DAYS_THRESHOLD = 3;
 
 /**
+ * FIFO Historical Snapshot Vault Constants.
+ * Stored per-project in Jira Project Entity Properties (`asUser()`) with zero additional scopes.
+ * When capacity (>104 reports or >28 KB) is reached, ONLY the single oldest chronological
+ * snapshot (`snapshots[0]`) is unhooked one-by-one (strict FIFO circular buffer).
+ */
+const FIFO_VAULT_PROPERTY_KEY = 'agile_pulse_fifo_snapshots_v1';
+const MAX_FIFO_SNAPSHOTS = 104; // 2 years of weekly executive snapshots
+const MAX_FIFO_BYTES = 28672; // 28 KB safety ceiling inside Jira's 32 KB entity property limit
+
+/**
  * Validation & sanitization helpers for JQL and Jira identifiers.
  */
 const PROJECT_KEY_REGEX = /^[A-Z][A-Z0-9_]{1,15}$/i;
@@ -1262,6 +1272,37 @@ resolver.define('getProjectAnalytics', async (req) => {
       typeBreakdown: backlogTypeChartData,
     };
 
+    // --- FIFO HISTORICAL SNAPSHOT VAULT SYNC ---
+    const currentCompactSnapshot = buildCompactSnapshot({
+      now,
+      sprintScope: sprint || 'active',
+      activeSprintName,
+      totalStoryPoints,
+      completedStoryPoints,
+      inProgressStoryPoints: Math.round(inProgressStoryPoints * 10) / 10,
+      toDoStoryPoints: Math.round(toDoStoryPoints * 10) / 10,
+      spCompletionRate,
+      ticketCompletionRate,
+      totalIssues,
+      completedCount,
+      bugCount,
+      activeBugCount,
+      staleCount: staleIssues.length,
+      avgCycleTimeDays,
+      unestimatedPointsCount,
+      orphanIssuesCount,
+      backlogTotalPoints: Math.round(backlogTotalPoints * 10) / 10,
+      backlogTotalItems,
+      trigger: 'auto-daily',
+    });
+
+    const fifoHistory = await syncProjectFifoVault(
+      projectKey,
+      currentCompactSnapshot,
+      rawIssues,
+      { forceNew: false }
+    );
+
     return {
       success: true,
       projectKey,
@@ -1316,6 +1357,7 @@ resolver.define('getProjectAnalytics', async (req) => {
       orphanIssuesCount,
       orphanIssuesPoints: Math.round(orphanIssuesPoints * 10) / 10,
       backlog: backlogSummary,
+      fifoHistory,
     };
   } catch (err) {
     return {
@@ -1458,6 +1500,460 @@ resolver.define('updateIssueAssignee', async (req) => {
     };
   } catch (err) {
     return { success: false, error: err.message };
+  }
+});
+
+/**
+ * ============================================================================
+ * FIFO HISTORICAL SNAPSHOT VAULT ENGINE (1-BY-1 CHRONOLOGICAL EVICTION)
+ * ============================================================================
+ */
+
+function createDefaultFifoVault() {
+  return {
+    version: 1,
+    maxCapacity: MAX_FIFO_SNAPSHOTS,
+    totalEvictedCount: 0,
+    lastEvictedReport: null,
+    snapshots: [],
+  };
+}
+
+function buildCompactSnapshot({
+  now = Date.now(),
+  sprintScope = 'active',
+  activeSprintName = null,
+  totalStoryPoints = 0,
+  completedStoryPoints = 0,
+  inProgressStoryPoints = 0,
+  toDoStoryPoints = 0,
+  spCompletionRate = 0,
+  ticketCompletionRate = 0,
+  totalIssues = 0,
+  completedCount = 0,
+  bugCount = 0,
+  activeBugCount = 0,
+  staleCount = 0,
+  avgCycleTimeDays = null,
+  unestimatedPointsCount = 0,
+  orphanIssuesCount = 0,
+  backlogTotalPoints = 0,
+  backlogTotalItems = 0,
+  trigger = 'auto-daily',
+}) {
+  const iso = new Date(now).toISOString();
+  return {
+    id: `snap_${now}_${Math.random().toString(36).slice(2, 6)}`,
+    ts: now,
+    dateLabel: iso.slice(0, 10),
+    timeLabel: iso.slice(11, 19),
+    sprintName:
+      activeSprintName ||
+      (sprintScope === 'all'
+        ? 'All Project Scope'
+        : sprintScope === 'backlog'
+        ? 'Backlog Scope'
+        : 'Active Sprint'),
+    scope: sprintScope,
+    totalSP: Math.round(totalStoryPoints * 10) / 10,
+    doneSP: Math.round(completedStoryPoints * 10) / 10,
+    inProgSP: Math.round(inProgressStoryPoints * 10) / 10,
+    toDoSP: Math.round(toDoStoryPoints * 10) / 10,
+    compRate: spCompletionRate,
+    ticketCompRate: ticketCompletionRate,
+    totalIssues,
+    doneIssues: completedCount,
+    bugCount,
+    openBugs: activeBugCount,
+    staleCount,
+    cycleTime: avgCycleTimeDays,
+    unestimated: unestimatedPointsCount,
+    orphanCount: orphanIssuesCount,
+    backlogSP: Math.round(backlogTotalPoints * 10) / 10,
+    backlogItems: backlogTotalItems,
+    trigger,
+  };
+}
+
+/**
+ * Reconstructs real historical weekly checkpoints from Jira issues' actual `created`
+ * and `resolutiondate` timestamps when a project initializes its FIFO vault for the first time.
+ */
+function reconstructInitialJiraHistory(rawIssues = [], now = Date.now(), activeSprintName = null) {
+  if (!Array.isArray(rawIssues) || rawIssues.length === 0) return [];
+
+  const createdTimes = rawIssues
+    .map((i) => (i.created ? new Date(i.created).getTime() : null))
+    .filter((t) => t && !isNaN(t));
+
+  if (createdTimes.length === 0) return [];
+
+  const earliestMs = Math.min(...createdTimes);
+  const spanMs = Math.max(0, now - earliestMs);
+  if (spanMs < 24 * 3600 * 1000) return [];
+
+  // Create up to 4 real historical checkpoints between earliest issue creation and 1 day ago
+  const steps = 4;
+  const historySnaps = [];
+
+  for (let step = 1; step <= steps; step++) {
+    const chkMs = Math.round(earliestMs + (spanMs * step) / (steps + 1));
+    const existingAtChk = rawIssues.filter((i) => {
+      const cMs = i.created ? new Date(i.created).getTime() : now;
+      return cMs <= chkMs;
+    });
+    if (existingAtChk.length === 0) continue;
+
+    let totalSP = 0;
+    let doneSP = 0;
+    let inProgSP = 0;
+    let toDoSP = 0;
+    let doneIssues = 0;
+    let bugCount = 0;
+    let openBugs = 0;
+
+    existingAtChk.forEach((i) => {
+      const sp = Number(i.storyPoints) || 0;
+      totalSP += sp;
+      const resMs = i.resolutiondate ? new Date(i.resolutiondate).getTime() : null;
+      const wasDoneAtChk = i.statusCategory === 'done' && resMs !== null && resMs <= chkMs;
+
+      if (wasDoneAtChk) {
+        doneIssues += 1;
+        doneSP += sp;
+      } else if (i.statusCategory === 'indeterminate') {
+        inProgSP += sp;
+      } else {
+        toDoSP += sp;
+      }
+
+      if (i.isBug) {
+        bugCount += 1;
+        if (!wasDoneAtChk) openBugs += 1;
+      }
+    });
+
+    const totalIssues = existingAtChk.length;
+    const ticketCompRate = totalIssues > 0 ? Math.round((doneIssues / totalIssues) * 100) : 0;
+    const spCompRate = totalSP > 0 ? Math.round((doneSP / totalSP) * 100) : ticketCompRate;
+
+    historySnaps.push(
+      buildCompactSnapshot({
+        now: chkMs,
+        sprintScope: 'all',
+        activeSprintName: activeSprintName || 'Historical Baseline',
+        totalStoryPoints: totalSP,
+        completedStoryPoints: doneSP,
+        inProgressStoryPoints: inProgSP,
+        toDoStoryPoints: toDoSP,
+        spCompletionRate: spCompRate,
+        ticketCompletionRate: ticketCompRate,
+        totalIssues,
+        completedCount: doneIssues,
+        bugCount,
+        activeBugCount: openBugs,
+        staleCount: 0,
+        avgCycleTimeDays: null,
+        unestimatedPointsCount: 0,
+        orphanIssuesCount: totalIssues,
+        backlogTotalPoints: 0,
+        backlogTotalItems: 0,
+        trigger: 'jira-history',
+      })
+    );
+  }
+
+  return historySnaps;
+}
+
+const inMemoryFifoVaultCache = new Map();
+const projectAnchorIssueCache = new Map();
+
+async function resolveProjectAnchorIssueKey(projectKey, candidateIssues = []) {
+  if (projectAnchorIssueCache.has(projectKey)) {
+    return projectAnchorIssueCache.get(projectKey);
+  }
+
+  // If we already have candidate issues in memory, pick the lowest issue number deterministically
+  if (Array.isArray(candidateIssues) && candidateIssues.length > 0) {
+    const sortedKeys = candidateIssues
+      .map((i) => i.key)
+      .filter(Boolean)
+      .sort((a, b) => {
+        const numA = Number((a.split('-')[1] || '0').replace(/\D/g, '')) || 0;
+        const numB = Number((b.split('-')[1] || '0').replace(/\D/g, '')) || 0;
+        return numA - numB;
+      });
+    if (sortedKeys[0]) {
+      projectAnchorIssueCache.set(projectKey, sortedKeys[0]);
+      return sortedKeys[0];
+    }
+  }
+
+  // Otherwise query the earliest created issue in the project (maxResults: 1)
+  try {
+    const jql = `project = "${jqlQuote(projectKey)}" ORDER BY created ASC`;
+    const searchData = await fetchJira(route`/rest/api/3/search/jql`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify({ jql, maxResults: 1, fields: ['summary'] }),
+    });
+    const firstKey = searchData?.issues?.[0]?.key || null;
+    if (firstKey) {
+      projectAnchorIssueCache.set(projectKey, firstKey);
+    }
+    return firstKey;
+  } catch (err) {
+    return null;
+  }
+}
+
+async function readProjectFifoVault(projectKey, candidateIssues = []) {
+  try {
+    const anchorKey = await resolveProjectAnchorIssueKey(projectKey, candidateIssues);
+    if (!anchorKey) {
+      return inMemoryFifoVaultCache.get(projectKey) || createDefaultFifoVault();
+    }
+
+    const res = await api
+      .asUser()
+      .requestJira(route`/rest/api/3/issue/${anchorKey}/properties/${FIFO_VAULT_PROPERTY_KEY}`);
+    if (!res.ok) {
+      return inMemoryFifoVaultCache.get(projectKey) || createDefaultFifoVault();
+    }
+    const text = await res.text();
+    if (!text) return inMemoryFifoVaultCache.get(projectKey) || createDefaultFifoVault();
+    const parsed = JSON.parse(text);
+    const val = parsed?.value;
+    if (!val || !Array.isArray(val.snapshots)) {
+      return inMemoryFifoVaultCache.get(projectKey) || createDefaultFifoVault();
+    }
+    const loadedVault = {
+      version: val.version || 1,
+      maxCapacity: MAX_FIFO_SNAPSHOTS,
+      totalEvictedCount: Number(val.totalEvictedCount) || 0,
+      lastEvictedReport: val.lastEvictedReport || null,
+      snapshots: val.snapshots,
+    };
+    inMemoryFifoVaultCache.set(projectKey, loadedVault);
+    return loadedVault;
+  } catch (err) {
+    return inMemoryFifoVaultCache.get(projectKey) || createDefaultFifoVault();
+  }
+}
+
+async function writeProjectFifoVault(projectKey, vault, candidateIssues = []) {
+  inMemoryFifoVaultCache.set(projectKey, vault);
+  try {
+    const anchorKey = await resolveProjectAnchorIssueKey(projectKey, candidateIssues);
+    if (!anchorKey) return false;
+
+    await api
+      .asUser()
+      .requestJira(route`/rest/api/3/issue/${anchorKey}/properties/${FIFO_VAULT_PROPERTY_KEY}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify(vault),
+      });
+    return true;
+  } catch (err) {
+    console.warn('Could not persist FIFO snapshot vault:', err.message);
+    return false;
+  }
+}
+
+/**
+ * Enforces the strict 1-by-1 FIFO Rolling Window.
+ * Sorts chronologically ascending so `snapshots[0]` is always the oldest report.
+ * If capacity (`effectiveMax`) or byte limit (`MAX_FIFO_BYTES`) is exceeded,
+ * unhooks ONLY the single oldest chronological report (`snapshots.shift()`) one at a time.
+ */
+function enforceFifoRollingWindow(vault, effectiveMax = MAX_FIFO_SNAPSHOTS) {
+  vault.snapshots.sort((a, b) => (a.ts || 0) - (b.ts || 0));
+  const evictedNow = [];
+
+  while (
+    vault.snapshots.length > effectiveMax ||
+    (vault.snapshots.length > 1 &&
+      Buffer.byteLength(JSON.stringify(vault), 'utf8') > MAX_FIFO_BYTES)
+  ) {
+    const oldestReport = vault.snapshots.shift();
+    if (!oldestReport) break;
+    vault.totalEvictedCount = (vault.totalEvictedCount || 0) + 1;
+    const evictedMeta = {
+      id: oldestReport.id,
+      dateLabel: oldestReport.dateLabel,
+      timeLabel: oldestReport.timeLabel,
+      sprintName: oldestReport.sprintName,
+      totalSP: oldestReport.totalSP,
+      doneSP: oldestReport.doneSP,
+      compRate: oldestReport.compRate,
+      evictedAt: new Date().toISOString(),
+    };
+    vault.lastEvictedReport = evictedMeta;
+    evictedNow.push(evictedMeta);
+  }
+
+  return evictedNow;
+}
+
+function formatFifoHistoryResponse(vault, evictedNow = []) {
+  const byteSize = Buffer.byteLength(JSON.stringify(vault), 'utf8');
+  const usedCount = vault.snapshots.length;
+  return {
+    snapshots: vault.snapshots,
+    usedCount,
+    maxCapacity: MAX_FIFO_SNAPSHOTS,
+    usagePct: Math.min(100, Math.round((usedCount / MAX_FIFO_SNAPSHOTS) * 100)),
+    byteSize,
+    maxBytes: MAX_FIFO_BYTES,
+    byteUsagePct: Math.min(100, Math.round((byteSize / MAX_FIFO_BYTES) * 100)),
+    totalEvictedCount: vault.totalEvictedCount || 0,
+    lastEvictedReport: vault.lastEvictedReport || null,
+    evictedNow,
+  };
+}
+
+async function syncProjectFifoVault(
+  projectKey,
+  newSnapshot,
+  rawIssues = [],
+  { forceNew = false, effectiveMax = MAX_FIFO_SNAPSHOTS } = {}
+) {
+  const vault = await readProjectFifoVault(projectKey, rawIssues);
+
+  // If vault is completely empty on first run, reconstruct initial checkpoints from real Jira issue dates
+  if (vault.snapshots.length === 0 && Array.isArray(rawIssues) && rawIssues.length > 0) {
+    const initialHistory = reconstructInitialJiraHistory(
+      rawIssues,
+      newSnapshot.ts,
+      newSnapshot.sprintName
+    );
+    vault.snapshots.push(...initialHistory);
+  }
+
+  vault.snapshots.sort((a, b) => (a.ts || 0) - (b.ts || 0));
+
+  if (!forceNew && vault.snapshots.length > 0) {
+    const latest = vault.snapshots[vault.snapshots.length - 1];
+    if (
+      latest.dateLabel === newSnapshot.dateLabel &&
+      latest.trigger !== 'manual-capture' &&
+      latest.trigger !== 'jira-history'
+    ) {
+      // Update today's auto-daily snapshot in place
+      vault.snapshots[vault.snapshots.length - 1] = {
+        ...newSnapshot,
+        id: latest.id,
+      };
+    } else {
+      vault.snapshots.push(newSnapshot);
+    }
+  } else {
+    vault.snapshots.push(newSnapshot);
+  }
+
+  const evictedNow = enforceFifoRollingWindow(vault, effectiveMax);
+  await writeProjectFifoVault(projectKey, vault, rawIssues);
+
+  return formatFifoHistoryResponse(vault, evictedNow);
+}
+
+/**
+ * Resolver: captureFifoSnapshot
+ * Manually captures a new point-in-time snapshot into the project's FIFO queue.
+ * If `simulateFullQueue` is true, sets `effectiveMax` to the current length so that adding
+ * the new snapshot immediately demonstrates unhooking ONLY the single oldest chronological report!
+ */
+resolver.define('captureFifoSnapshot', async (req) => {
+  const { projectKey: rawProjectKey, snapshotData, simulateFullQueue = false } = req.payload || {};
+  if (!rawProjectKey) {
+    return { success: false, error: 'Project key is required.' };
+  }
+
+  try {
+    const projectKey = assertProjectKey(rawProjectKey);
+    const vault = await readProjectFifoVault(projectKey);
+    const now = Date.now();
+
+    const manualSnap = buildCompactSnapshot({
+      now,
+      sprintScope: snapshotData?.sprintScope || 'active',
+      activeSprintName: snapshotData?.activeSprintName || 'Manual Snapshot',
+      totalStoryPoints: Number(snapshotData?.totalStoryPoints) || 0,
+      completedStoryPoints: Number(snapshotData?.completedStoryPoints) || 0,
+      inProgressStoryPoints: Number(snapshotData?.inProgressStoryPoints) || 0,
+      toDoStoryPoints: Number(snapshotData?.toDoStoryPoints) || 0,
+      spCompletionRate: Number(snapshotData?.spCompletionRate) || 0,
+      ticketCompletionRate: Number(snapshotData?.ticketCompletionRate) || 0,
+      totalIssues: Number(snapshotData?.totalIssues) || 0,
+      completedCount: Number(snapshotData?.completedCount) || 0,
+      bugCount: Number(snapshotData?.bugCount) || 0,
+      activeBugCount: Number(snapshotData?.activeBugCount) || 0,
+      staleCount: Number(snapshotData?.staleCount) || 0,
+      avgCycleTimeDays: snapshotData?.avgCycleTimeDays ?? null,
+      unestimatedPointsCount: Number(snapshotData?.unestimatedPointsCount) || 0,
+      orphanIssuesCount: Number(snapshotData?.orphanIssuesCount) || 0,
+      backlogTotalPoints: Number(snapshotData?.backlogTotalPoints) || 0,
+      backlogTotalItems: Number(snapshotData?.backlogTotalItems) || 0,
+      trigger: simulateFullQueue ? 'fifo-rollover-test' : 'manual-capture',
+    });
+
+    const previousLength = vault.snapshots.length;
+    vault.snapshots.push(manualSnap);
+
+    // If testing FIFO rollover on a non-full queue, cap at previousLength so adding 1 unhooks 1 oldest
+    const effectiveMax =
+      simulateFullQueue && previousLength > 0 ? previousLength : MAX_FIFO_SNAPSHOTS;
+
+    const evictedNow = enforceFifoRollingWindow(vault, effectiveMax);
+    await writeProjectFifoVault(projectKey, vault);
+
+    return {
+      success: true,
+      fifoHistory: formatFifoHistoryResponse(vault, evictedNow),
+    };
+  } catch (err) {
+    return { success: false, error: err.message || 'Failed to capture snapshot.' };
+  }
+});
+
+/**
+ * Resolver: shiftOldestFifoSnapshot
+ * Manually unhooks ONLY the single oldest chronological report (`snapshots[0]`) from the FIFO queue.
+ */
+resolver.define('shiftOldestFifoSnapshot', async (req) => {
+  const { projectKey: rawProjectKey } = req.payload || {};
+  if (!rawProjectKey) {
+    return { success: false, error: 'Project key is required.' };
+  }
+
+  try {
+    const projectKey = assertProjectKey(rawProjectKey);
+    const vault = await readProjectFifoVault(projectKey);
+    if (vault.snapshots.length <= 1) {
+      return {
+        success: false,
+        error: 'At least 1 baseline snapshot is kept in the vault.',
+      };
+    }
+
+    // Target strictly the current length minus 1 so enforceFifoRollingWindow shifts exactly 1 oldest item
+    const evictedNow = enforceFifoRollingWindow(vault, vault.snapshots.length - 1);
+    await writeProjectFifoVault(projectKey, vault);
+
+    return {
+      success: true,
+      fifoHistory: formatFifoHistoryResponse(vault, evictedNow),
+    };
+  } catch (err) {
+    return { success: false, error: err.message || 'Failed to unhook oldest snapshot.' };
   }
 });
 
