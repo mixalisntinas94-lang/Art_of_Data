@@ -1,4 +1,5 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
+import { router } from '@forge/bridge';
 import {
   Activity,
   AlertTriangle,
@@ -190,6 +191,7 @@ export default function SprintView({
   analytics,
   kpis,
   metricMode,
+  sprintScope = 'active',
   selectedType,
   selectedAssignee,
   selectedStatus,
@@ -212,6 +214,8 @@ export default function SprintView({
   activeSprintStartDate,
   activeSprintEndDate,
 }) {
+  const [showAllStream, setShowAllStream] = useState(false);
+
   // ── DYNAMIC CONDITIONAL THEMING (Global Utility Engine) ──
   const completionTheme = useMemo(
     () => getKpiTheme('completion', kpis, { sprintTimeElapsed }),
@@ -226,13 +230,49 @@ export default function SprintView({
     [kpis]
   );
   const estimationTheme = useMemo(
-    () => getKpiTheme('estimation', kpis),
-    [kpis]
+    () => getKpiTheme('estimation', kpis, { metricMode }),
+    [kpis, metricMode]
   );
   const cycleTimeTheme = useMemo(
     () => getKpiTheme('cycleTime', kpis),
     [kpis]
   );
+
+  const activeScopeLabel = useMemo(() => {
+    if (sprintScope === 'all' || analytics?.sprintFallbackOccurred) {
+      return 'All Project Scope (Full History)';
+    }
+    if (sprintScope === 'backlog') {
+      return 'Backlog Only (No Sprint)';
+    }
+    if (sprintScope === 'active') {
+      return analytics?.activeSprintName || 'Current Sprint';
+    }
+    return sprintScope;
+  }, [sprintScope, analytics?.activeSprintName, analytics?.sprintFallbackOccurred]);
+
+  const unestimatedCount =
+    metricMode === 'hours' ? kpis.unestimatedHoursCount : kpis.unestimatedPointsCount;
+
+  const typeChartTotalMetric = useMemo(
+    () =>
+      typeChartData.reduce(
+        (sum, c) => sum + (metricMode === 'hours' ? c.hours || 0 : c.points || 0),
+        0
+      ),
+    [typeChartData, metricMode]
+  );
+  const typeChartTotalCount = useMemo(
+    () => typeChartData.reduce((sum, c) => sum + (c.count || 0), 0),
+    [typeChartData]
+  );
+
+  const openJiraIssue = (issueKey) => {
+    if (!issueKey) return;
+    if (router && typeof router.open === 'function') {
+      router.open(`/browse/${issueKey}`).catch(() => {});
+    }
+  };
 
   // ── STRICT 1:1 LIVE SPARKLINES BINDING ──
   const sprintMeta = useMemo(() => ({
@@ -295,7 +335,7 @@ export default function SprintView({
           </span>
           <p className="text-xs text-slate-300">
             <strong className="text-white">Active Scope:</strong>{' '}
-            {analytics.activeSprintName || 'Current Sprint'} ·{' '}
+            {activeScopeLabel} ·{' '}
             <span className="text-slate-400">
               {kpis.totalIssues} issues ({kpis.completedCount} done, {kpis.inProgressCount} in flight)
             </span>
@@ -422,7 +462,7 @@ export default function SprintView({
             />
           </div>
           <p className="text-xs text-slate-400 mt-1 relative z-10">
-            {kpis.bugCount} active bugs · {kpis.staleCount} stale items
+            {kpis.activeBugCount} open ({kpis.bugCount} total bugs) · {kpis.staleCount} stale items
           </p>
         </div>
 
@@ -435,7 +475,7 @@ export default function SprintView({
           </div>
           <div className="mt-2 mb-1 relative z-10">
             <span className={`text-4xl font-extrabold tracking-tight ${estimationTheme.textColorClass}`}>
-              {kpis.unestimatedPointsCount === 0 ? '100%' : `${kpis.unestimatedPointsCount}`}
+              {unestimatedCount === 0 ? '100%' : `${unestimatedCount}`}
             </span>
           </div>
           <div className="relative z-10">
@@ -445,9 +485,13 @@ export default function SprintView({
             />
           </div>
           <p className="text-xs text-slate-400 mt-1 relative z-10">
-            {kpis.unestimatedPointsCount === 0
-              ? 'All tickets estimated with points'
-              : 'Tickets missing Story Points'}
+            {unestimatedCount === 0
+              ? metricMode === 'hours'
+                ? 'All active tickets have time estimates'
+                : 'All active tickets estimated with points'
+              : metricMode === 'hours'
+              ? 'Active tickets missing time estimates'
+              : 'Active tickets missing Story Points'}
           </p>
         </div>
 
@@ -472,7 +516,7 @@ export default function SprintView({
             />
           </div>
           <p className="text-xs text-slate-400 mt-1 relative z-10">
-            {(analytics.teamMembers || []).length} active contributor(s)
+            {kpis.activeContributorsCount} active contributor(s)
           </p>
         </div>
       </div>
@@ -576,9 +620,11 @@ export default function SprintView({
                   <span className="text-xs font-semibold text-slate-200">Done</span>
                 </div>
                 <div className="text-right">
-                  <span className="text-xs font-bold text-white">{kpis.completedStoryPoints} SP</span>
+                  <span className="text-xs font-bold text-white">
+                    {metricMode === 'hours' ? `${kpis.completedHours || 0}h` : `${kpis.completedStoryPoints} SP`}
+                  </span>
                   <span className="text-[11px] text-slate-400 ml-1.5 font-medium">
-                    ({kpis.completedCount} tickets · {kpis.completionRate}%)
+                    ({kpis.completedCount} tickets · {kpis.doneSharePct}%)
                   </span>
                 </div>
               </div>
@@ -599,10 +645,10 @@ export default function SprintView({
                 </div>
                 <div className="text-right">
                   <span className="text-xs font-bold text-white">
-                    {kpis.inProgressStoryPoints || 0} SP
+                    {metricMode === 'hours' ? `${kpis.inProgressHours || 0}h` : `${kpis.inProgressStoryPoints || 0} SP`}
                   </span>
                   <span className="text-[11px] text-slate-400 ml-1.5 font-medium">
-                    ({kpis.inProgressCount} tickets)
+                    ({kpis.inProgressCount} tickets · {kpis.inProgressSharePct}%)
                   </span>
                 </div>
               </div>
@@ -623,10 +669,10 @@ export default function SprintView({
                 </div>
                 <div className="text-right">
                   <span className="text-xs font-bold text-white">
-                    {kpis.toDoStoryPoints || 0} SP
+                    {metricMode === 'hours' ? `${kpis.toDoHours || 0}h` : `${kpis.toDoStoryPoints || 0} SP`}
                   </span>
                   <span className="text-[11px] text-slate-400 ml-1.5 font-medium">
-                    ({kpis.toDoCount} tickets)
+                    ({kpis.toDoCount} tickets · {kpis.toDoSharePct}%)
                   </span>
                 </div>
               </div>
@@ -719,8 +765,8 @@ export default function SprintView({
 
                   {/* Semantic Color Bar with Dimming on non-selected elements */}
                   <Bar
-                    dataKey="points"
-                    name="Story Points"
+                    dataKey={metricMode === 'hours' ? 'hours' : 'points'}
+                    name={metricMode === 'hours' ? 'Estimated Hours' : 'Story Points'}
                     maxBarSize={32}
                     radius={[6, 6, 0, 0]}
                   >
@@ -741,12 +787,14 @@ export default function SprintView({
                       );
                     })}
                     <LabelList
-                      dataKey="points"
+                      dataKey={metricMode === 'hours' ? 'hours' : 'points'}
                       position="top"
                       fill="#f8fafc"
                       fontSize={11}
                       fontWeight={800}
-                      formatter={(val) => (val > 0 ? `${val} SP` : '0')}
+                      formatter={(val) =>
+                        val > 0 ? (metricMode === 'hours' ? `${val}h` : `${val} SP`) : '0'
+                      }
                     />
                   </Bar>
                 </BarChart>
@@ -784,7 +832,13 @@ export default function SprintView({
                     {typeChartData[0]?.name || 'Standard Tasks'}
                   </span>
                   <span className="text-indigo-400 font-mono">
-                    {typeChartData[0] ? `${typeChartData[0].points} SP` : '0 SP'}
+                    {typeChartData[0]
+                      ? metricMode === 'hours'
+                        ? `${typeChartData[0].hours || 0}h`
+                        : `${typeChartData[0].points} SP`
+                      : metricMode === 'hours'
+                      ? '0h'
+                      : '0 SP'}
                   </span>
                 </div>
               </div>
@@ -792,9 +846,12 @@ export default function SprintView({
               {/* Detailed Category Stats List with Jira Type Icons & Click Filter */}
               <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
                 {typeChartData.map((cat, idx) => {
+                  const catVal = metricMode === 'hours' ? cat.hours || 0 : cat.points || 0;
                   const pct =
-                    kpis.totalStoryPoints > 0
-                      ? Math.round((cat.points / kpis.totalStoryPoints) * 100)
+                    typeChartTotalMetric > 0
+                      ? Math.round((catVal / typeChartTotalMetric) * 100)
+                      : typeChartTotalCount > 0
+                      ? Math.round((cat.count / typeChartTotalCount) * 100)
                       : 0;
                   const isSelected = selectedType === cat.name;
                   const isDimmed = selectedType && !isSelected;
@@ -828,7 +885,7 @@ export default function SprintView({
                           style={{ color: sem.color }}
                           className="font-bold font-mono text-[11px] w-12 text-right"
                         >
-                          {cat.points} SP
+                          {metricMode === 'hours' ? `${cat.hours || 0}h` : `${cat.points} SP`}
                         </span>
                         <span className="text-indigo-400 font-bold text-[10px] w-8 text-right">
                           {pct}%
@@ -849,8 +906,12 @@ export default function SprintView({
           </div>
 
           <div className="flex items-center justify-between text-xs text-slate-400 pt-3 border-t border-slate-800/60">
-            <span>Bug Density: {kpis.bugRatio}%</span>
-            <span className="font-semibold text-indigo-400">{kpis.totalStoryPoints} total Story Points</span>
+            <span>Bug Share: {kpis.bugSpRatio}% of SP ({kpis.bugRatio}% of tkts)</span>
+            <span className="font-semibold text-indigo-400">
+              {metricMode === 'hours'
+                ? `${kpis.totalEstimatedHours}h total estimated`
+                : `${kpis.totalStoryPoints} total Story Points`}
+            </span>
           </div>
         </div>
       </div>
@@ -869,20 +930,20 @@ export default function SprintView({
               <div className="flex items-center gap-3 text-xs flex-wrap">
                 <span className="flex items-center gap-1.5 text-slate-300 font-medium">
                   <span className="w-2 h-2 rounded-full bg-emerald-500 shadow-sm" />
-                  Done SP
+                  {metricMode === 'hours' ? 'Done Hours' : 'Done SP'}
                 </span>
                 <span className="flex items-center gap-1.5 text-slate-300 font-medium">
                   <span className="w-2 h-2 rounded-full bg-indigo-500 shadow-sm" />
-                  Remaining SP
+                  {metricMode === 'hours' ? 'Remaining Hours' : 'Remaining SP'}
                 </span>
                 <span className="flex items-center gap-1.5 text-rose-400 font-medium border-l border-slate-700 pl-2">
                   <span className="w-3 border-b-2 border-dashed border-rose-500" />
-                  Capacity Limit (40 SP)
+                  Capacity Limit (40 {metricMode === 'hours' ? 'h' : 'SP'})
                 </span>
               </div>
             </div>
             <p className="text-xs text-slate-400 mt-1">
-              Slim workload bars with 40 SP burnout threshold line. Click assignee to isolate their tasks and KPIs.
+              Slim workload bars with 40 {metricMode === 'hours' ? 'h' : 'SP'} burnout threshold line. Click assignee to isolate their tasks and KPIs.
             </p>
           </div>
 
@@ -935,24 +996,24 @@ export default function SprintView({
                   }}
                 />
 
-                {/* Capacity Limit Dashed Line at 40 Story Points */}
+                {/* Capacity Limit Dashed Line at 40 Story Points / Hours */}
                 <ReferenceLine
                   x={40}
                   stroke="#f43f5e"
                   strokeDasharray="4 4"
                   strokeWidth={2}
                   label={{
-                    value: 'Capacity (40 SP)',
+                    value: metricMode === 'hours' ? 'Capacity (40h)' : 'Capacity (40 SP)',
                     fill: '#fb7185',
                     fontSize: 10,
                     position: 'top',
                   }}
                 />
 
-                {/* Stacked Done Story Points (Slim Bar) */}
+                {/* Stacked Done Story Points / Hours (Slim Bar) */}
                 <Bar
-                  dataKey="completedPoints"
-                  name="Done SP"
+                  dataKey={metricMode === 'hours' ? 'completedHours' : 'completedPoints'}
+                  name={metricMode === 'hours' ? 'Done Hours' : 'Done SP'}
                   stackId="assigneeEffort"
                   fill="#10b981"
                 >
@@ -971,10 +1032,10 @@ export default function SprintView({
                   })}
                 </Bar>
 
-                {/* Stacked Remaining Story Points (Slim Bar) */}
+                {/* Stacked Remaining Story Points / Hours (Slim Bar) */}
                 <Bar
-                  dataKey="remainingPoints"
-                  name="Remaining SP"
+                  dataKey={metricMode === 'hours' ? 'remainingHours' : 'remainingPoints'}
+                  name={metricMode === 'hours' ? 'Remaining Hours' : 'Remaining SP'}
                   stackId="assigneeEffort"
                   fill="#6366f1"
                   radius={[0, 4, 4, 0]}
@@ -993,29 +1054,41 @@ export default function SprintView({
                     );
                   })}
                   <LabelList
-                    dataKey="totalPoints"
+                    dataKey={metricMode === 'hours' ? 'totalHours' : 'totalPoints'}
                     position="right"
                     fill="#cbd5e1"
                     fontSize={11}
                     fontWeight={700}
-                    formatter={(val) => (val > 0 ? `${val} SP` : '')}
+                    formatter={(val) =>
+                      val > 0 ? (metricMode === 'hours' ? `${val}h` : `${val} SP`) : ''
+                    }
                   />
                 </Bar>
               </BarChart>
             </ResponsiveContainer>
           </div>
 
-          {/* Over-capacity callouts if any team member exceeds 40 SP */}
+          {/* Over-capacity callouts if any team member exceeds 40 SP / 40h remaining */}
           <div className="flex items-center justify-between text-xs text-slate-400 pt-3 border-t border-slate-800/60 flex-wrap gap-2">
             <div className="flex items-center gap-2">
               <span>Capacity Burnout Alert:</span>
               {assigneeChartData.some((a) => a.isOverCapacity) ? (
                 <span className="px-2 py-0.5 rounded-full bg-rose-500/20 text-rose-400 border border-rose-500/30 font-bold flex items-center gap-1 text-[11px]">
                   <Flame className="w-3.5 h-3.5 text-rose-400" />
-                  {assigneeChartData.filter((a) => a.isOverCapacity).map((a) => `${a.name} (${a.totalPoints} SP)`).join(', ')} exceeds 40 SP limit!
+                  {assigneeChartData
+                    .filter((a) => a.isOverCapacity)
+                    .map((a) =>
+                      metricMode === 'hours'
+                        ? `${a.name} (${a.remainingHours}h remaining)`
+                        : `${a.name} (${a.remainingPoints} SP remaining)`
+                    )
+                    .join(', ')}{' '}
+                  exceeds 40 {metricMode === 'hours' ? 'h' : 'SP'} limit!
                 </span>
               ) : (
-                <span className="text-emerald-400 font-medium">All members within safe 40 SP limit</span>
+                <span className="text-emerald-400 font-medium">
+                  All members within safe 40 {metricMode === 'hours' ? 'h' : 'SP'} limit
+                </span>
               )}
             </div>
             <span className="text-cyan-400 font-semibold">
@@ -1059,12 +1132,15 @@ export default function SprintView({
 
             {/* Issues List with Stale (>= 3 days) Orange Border Highlight */}
             <div className="mt-3 space-y-2 max-h-[340px] overflow-y-auto pr-1">
-              {displayedStreamIssues.slice(0, 8).map((issue) => {
-                const isStaleItem = issue.isStale || (issue.daysInactive !== undefined && issue.daysInactive >= 3);
+              {(showAllStream ? displayedStreamIssues : displayedStreamIssues.slice(0, 8)).map((issue) => {
+                const isStaleItem =
+                  issue.statusCategory !== 'done' &&
+                  (Boolean(issue.isStale) || (issue.daysInactive !== undefined && issue.daysInactive >= 3));
 
                 return (
                   <div
                     key={issue.id}
+                    onClick={() => openJiraIssue(issue.key)}
                     className={`p-2.5 rounded-xl border transition-all duration-200 group flex items-center justify-between cursor-pointer ${isStaleItem
                         ? 'border-amber-500/70 bg-amber-500/10 hover:bg-amber-500/20 shadow-[0_0_15px_rgba(245,158,11,0.15)]'
                         : 'border-transparent hover:border-blue-500/60 hover:bg-blue-600/20 hover:shadow-[0_0_20px_rgba(59,130,246,0.22)]'
@@ -1129,11 +1205,11 @@ export default function SprintView({
                             />
                           )}
                           <span className="truncate">{issue.assignee || 'Unassigned'}</span>
-                          {issue.storyPoints > 0 && (
+                          {(metricMode === 'hours' ? issue.estimatedHours > 0 : issue.storyPoints > 0) && (
                             <>
                               <span>·</span>
                               <span className="text-indigo-400 font-semibold">
-                                {issue.storyPoints} SP
+                                {metricMode === 'hours' ? `${issue.estimatedHours}h` : `${issue.storyPoints} SP`}
                               </span>
                             </>
                           )}
@@ -1165,9 +1241,10 @@ export default function SprintView({
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
+                            openJiraIssue(issue.key);
                           }}
                           className="p-1 bg-blue-600/40 hover:bg-blue-600 text-blue-200 hover:text-white rounded border border-blue-400/50 shadow-sm"
-                          title="Inspect ticket"
+                          title="Inspect ticket in Jira"
                         >
                           <ArrowUpRight className="w-3 h-3" />
                         </button>
@@ -1176,6 +1253,20 @@ export default function SprintView({
                   </div>
                 );
               })}
+
+              {displayedStreamIssues.length > 8 && (
+                <div className="pt-1 text-center">
+                  <button
+                    type="button"
+                    onClick={() => setShowAllStream(!showAllStream)}
+                    className="text-xs font-semibold text-blue-400 hover:text-blue-300 px-3 py-1 rounded-lg bg-slate-800/70 hover:bg-slate-800 border border-slate-700 transition-colors"
+                  >
+                    {showAllStream
+                      ? 'Show top 8 tickets'
+                      : `Show all ${displayedStreamIssues.length} tickets (+${displayedStreamIssues.length - 8} more)`}
+                  </button>
+                </div>
+              )}
 
               {displayedStreamIssues.length === 0 && (
                 <div className="text-center py-8 text-xs text-slate-500 flex flex-col items-center gap-2">

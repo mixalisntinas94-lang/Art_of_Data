@@ -30,6 +30,7 @@ import ReactECharts from 'echarts-for-react';
 export default function BacklogAnalysisView({
   analytics,
   allIssues = [],
+  metricMode = 'points',
   onUpdateIssue,
   projectKey,
 }) {
@@ -38,9 +39,10 @@ export default function BacklogAnalysisView({
   const [sortBy, setSortBy] = useState('updated'); // 'updated', 'points', 'priority', 'created'
   const [sortAsc, setSortAsc] = useState(false);
 
-  // Extract Backlog issues (issues not in any active sprint and not done)
+  // Extract Backlog issues (issues not in any active sprint, not done, and not Epics)
   const backlogIssues = useMemo(() => {
     return allIssues.filter((issue) => {
+      if (issue.isEpic || (issue.type || '').toLowerCase() === 'epic') return false;
       // Must not be in Done category
       if (issue.statusCategory === 'done') return false;
       // Must be backlog (no sprints or isBacklog true)
@@ -54,6 +56,7 @@ export default function BacklogAnalysisView({
   const metrics = useMemo(() => {
     const totalItems = backlogIssues.length;
     let totalPoints = 0;
+    let totalHours = 0;
     let estimatedCount = 0;
     let staleCount60 = 0;
     let staleCount90 = 0;
@@ -78,9 +81,14 @@ export default function BacklogAnalysisView({
 
     backlogIssues.forEach((issue) => {
       const sp = Number(issue.storyPoints) || 0;
+      const estH = Number(issue.estimatedHours) || 0;
       totalPoints += sp;
+      totalHours += estH;
 
-      const isEst = issue.storyPoints !== null && issue.storyPoints !== undefined && sp > 0;
+      const isEst =
+        metricMode === 'hours'
+          ? estH > 0
+          : issue.storyPoints !== null && issue.storyPoints !== undefined && sp > 0;
       if (isEst) estimatedCount++;
 
       const days = issue.daysInactive !== undefined ? issue.daysInactive : 0;
@@ -104,11 +112,19 @@ export default function BacklogAnalysisView({
     });
 
     const readinessScore = totalItems > 0 ? Math.round((estimatedCount / totalItems) * 100) : 100;
-    const estRunwaySprints = totalPoints > 0 ? Math.max(1, Math.round(totalPoints / 25)) : 0;
+    const estRunwaySprints =
+      metricMode === 'hours'
+        ? totalHours > 0
+          ? Math.max(1, Math.round(totalHours / 80))
+          : 0
+        : totalPoints > 0
+        ? Math.max(1, Math.round(totalPoints / 25))
+        : 0;
 
     return {
       totalItems,
       totalPoints: Math.round(totalPoints * 10) / 10,
+      totalHours: Math.round(totalHours * 10) / 10,
       estimatedCount,
       unestimatedCount: totalItems - estimatedCount,
       readinessScore,
@@ -120,7 +136,7 @@ export default function BacklogAnalysisView({
       typeCounts,
       priorityCounts,
     };
-  }, [backlogIssues]);
+  }, [backlogIssues, metricMode]);
 
   // Filtered & Sorted Backlog Items for the Interactive Table
   const displayedIssues = useMemo(() => {
@@ -270,7 +286,10 @@ export default function BacklogAnalysisView({
             <span className="text-xs text-slate-400 font-medium">tickets</span>
           </div>
           <div className="mt-1 text-xs text-blue-400 font-semibold">
-            {metrics.totalPoints} <span className="text-slate-400 font-normal">Story Points</span>
+            {metricMode === 'hours' ? `${metrics.totalHours}h` : `${metrics.totalPoints}`}{' '}
+            <span className="text-slate-400 font-normal">
+              {metricMode === 'hours' ? 'Estimated Hours' : 'Story Points'}
+            </span>
           </div>
         </div>
 
@@ -313,15 +332,33 @@ export default function BacklogAnalysisView({
         <div className="p-4 rounded-xl bg-slate-900/80 border border-slate-800 shadow-sm relative overflow-hidden">
           <div className="flex items-center justify-between">
             <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Unestimated Debt</span>
-            <div className="w-7 h-7 rounded-lg bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-400">
-              <HelpCircle className="w-4 h-4" />
+            <div
+              className={`w-7 h-7 rounded-lg flex items-center justify-center ${
+                metrics.unestimatedCount === 0
+                  ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-400'
+                  : 'bg-amber-500/10 border border-amber-500/20 text-amber-400'
+              }`}
+            >
+              {metrics.unestimatedCount === 0 ? (
+                <CheckCircle2 className="w-4 h-4" />
+              ) : (
+                <HelpCircle className="w-4 h-4" />
+              )}
             </div>
           </div>
           <div className="mt-2 flex items-baseline gap-2">
-            <span className="text-2xl font-bold text-amber-300 tracking-tight">{metrics.unestimatedCount}</span>
+            <span
+              className={`text-2xl font-bold tracking-tight ${
+                metrics.unestimatedCount === 0 ? 'text-emerald-400' : 'text-amber-300'
+              }`}
+            >
+              {metrics.unestimatedCount}
+            </span>
             <span className="text-xs text-slate-400 font-medium">items</span>
           </div>
-          <div className="mt-1 text-xs text-slate-400">Needs grooming session</div>
+          <div className="mt-1 text-xs text-slate-400">
+            {metrics.unestimatedCount === 0 ? 'All backlog items estimated' : 'Needs grooming session'}
+          </div>
         </div>
 
         {/* Zombie / Stale Backlog */}

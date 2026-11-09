@@ -178,14 +178,56 @@ export default function ChartWidget({
       ? selectedPriority
       : null;
 
-  // Filter issues if widget has custom JQL or project
+  // Filter issues if widget has custom JQL clauses (supports AND, =, !=, ~, IS EMPTY, IS NOT EMPTY)
   const relevantIssues = useMemo(() => {
     if (!widget.jql || !widget.jql.trim()) return issues;
-    const lowerJql = widget.jql.toLowerCase();
+    const rawClauses = widget.jql
+      .split(/\s+AND\s+/i)
+      .map((c) => c.trim())
+      .filter(Boolean);
+
     return issues.filter((i) => {
-      if (lowerJql.includes('bug') && !((i.type || '').toLowerCase().includes('bug'))) return false;
-      if (lowerJql.includes('done') && i.statusCategory !== 'done') return false;
-      return true;
+      return rawClauses.every((clause) => {
+        const emptyMatch = clause.match(/^([a-zA-Z]+)\s+IS\s+(NOT\s+)?EMPTY$/i);
+        if (emptyMatch) {
+          const field = emptyMatch[1].toLowerCase();
+          const isNot = Boolean(emptyMatch[2]);
+          let val = '';
+          if (field === 'assignee') val = i.assignee === 'Unassigned' ? '' : i.assignee || '';
+          else if (field === 'sprint') val = Array.isArray(i.sprints) && i.sprints.length > 0 ? 'yes' : '';
+          else if (field === 'storypoints' || field === 'points') val = i.storyPoints ?? '';
+          const isEmpty = val === '' || val === null || val === undefined;
+          return isNot ? !isEmpty : isEmpty;
+        }
+
+        const opMatch = clause.match(/^([a-zA-Z]+)\s*(!=|~|=)\s*["']?([^"']+)["']?$/i);
+        if (opMatch) {
+          const field = opMatch[1].toLowerCase();
+          const op = opMatch[2];
+          const target = opMatch[3].trim().toLowerCase();
+
+          let actual = '';
+          if (field === 'issuetype' || field === 'type') actual = (i.type || '').toLowerCase();
+          else if (field === 'status' || field === 'statuscategory') {
+            actual = `${(i.status || '').toLowerCase()} ${(i.statusCategory || '').toLowerCase()} ${(i.statusBucket || '').toLowerCase()}`;
+          } else if (field === 'priority') actual = (i.priority || '').toLowerCase();
+          else if (field === 'assignee') actual = (i.assignee || '').toLowerCase();
+          else if (field === 'key' || field === 'issuekey') actual = (i.key || '').toLowerCase();
+          else if (field === 'summary' || field === 'text') actual = (i.summary || '').toLowerCase();
+          else return true;
+
+          const matches =
+            op === '~'
+              ? actual.includes(target)
+              : field === 'status' || field === 'statuscategory'
+              ? actual.split(/\s+/).includes(target) || actual.includes(target)
+              : actual === target || actual.includes(target);
+
+          return op === '!=' ? !matches : matches;
+        }
+
+        return true;
+      });
     });
   }, [issues, widget.jql]);
 

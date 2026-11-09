@@ -99,7 +99,7 @@ export function getKpiTheme(kpiType, kpis, meta = {}) {
     }
 
     case 'defect': {
-      const bugCount = kpis?.bugCount ?? 0;
+      const bugCount = kpis?.activeBugCount ?? kpis?.bugCount ?? 0;
       const bugRatio = kpis?.bugRatio ?? 0;
       if (bugCount > 0 || bugRatio > 0) {
         // Red when any bug exists
@@ -127,7 +127,10 @@ export function getKpiTheme(kpiType, kpis, meta = {}) {
     }
 
     case 'estimation': {
-      const unestimated = kpis?.unestimatedPointsCount ?? 0;
+      const unestimated =
+        meta.metricMode === 'hours'
+          ? (kpis?.unestimatedHoursCount ?? 0)
+          : (kpis?.unestimatedPointsCount ?? 0);
       if (unestimated === 0) {
         // Green at 100%
         return {

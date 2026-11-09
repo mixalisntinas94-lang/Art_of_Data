@@ -55,7 +55,7 @@ const DEFAULT_WIDGETS = [
   },
   {
     id: 'widget-4',
-    title: 'Total Active Scope (SP)',
+    title: 'Total Scope (SP)',
     chartType: 'number',
     groupBy: 'status',
     measure: 'storyPoints',
@@ -102,7 +102,13 @@ export default function CustomExplorerView({
       const saved = window.localStorage.getItem(`${storageKey}_widgets`);
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return parsed.map((w) =>
+            w.id === 'widget-4' && w.title === 'Total Active Scope (SP)'
+              ? { ...w, title: 'Total Scope (SP)' }
+              : w
+          );
+        }
       }
     } catch (e) {
       // Ignore storage access errors in strict iframe sandboxes

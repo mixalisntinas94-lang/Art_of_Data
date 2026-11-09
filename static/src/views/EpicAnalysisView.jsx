@@ -32,6 +32,7 @@ import ReactECharts from 'echarts-for-react';
 export default function EpicAnalysisView({
   analytics,
   allIssues = [],
+  metricMode = 'points',
   onUpdateIssue,
   projectKey,
 }) {
@@ -39,6 +40,7 @@ export default function EpicAnalysisView({
   const [filterMode, setFilterMode] = useState('all'); // 'all', 'active', 'atRisk', 'completed'
   const [expandedEpicKey, setExpandedEpicKey] = useState(null);
   const [showOrphanDetails, setShowOrphanDetails] = useState(false);
+  const [showAllOrphans, setShowAllOrphans] = useState(false);
 
   // Compute Epics dynamically from allIssues (with fallback to analytics.epics)
   const { epicsList, orphanIssues, epicMetrics } = useMemo(() => {
@@ -47,17 +49,24 @@ export default function EpicAnalysisView({
     let totalProjectPoints = 0;
     let totalEpicPoints = 0;
     let completedEpicPoints = 0;
+    let totalEpicHours = 0;
+    let completedEpicHours = 0;
     let atRiskCount = 0;
 
     allIssues.forEach((issue) => {
       const sp = Number(issue.storyPoints) || 0;
+      const estH = Number(issue.estimatedHours) || 0;
       totalProjectPoints += sp;
 
       const isEpicType = (issue.type || '').toLowerCase() === 'epic' || issue.isEpic;
-      const epicKey = isEpicType ? issue.key : issue.epicKey || issue.parent?.key || null;
+      const parentType = (issue.parent?.type || '').toLowerCase();
+      const parentIsEpic = !parentType || parentType === 'epic';
+      const epicKey = isEpicType
+        ? issue.key
+        : issue.epicKey || (parentIsEpic ? issue.parent?.key || null : null);
       const epicSummary = isEpicType
         ? (issue.summary || issue.key)
-        : issue.epicSummary || issue.parent?.summary || epicKey;
+        : issue.epicSummary || (parentIsEpic ? issue.parent?.summary || epicKey : null);
 
       const isDone = issue.statusCategory === 'done';
       const isInProgress = issue.statusCategory === 'indeterminate';
@@ -77,6 +86,10 @@ export default function EpicAnalysisView({
             donePoints: 0,
             inProgressPoints: 0,
             toDoPoints: 0,
+            totalHours: 0,
+            doneHours: 0,
+            inProgressHours: 0,
+            toDoHours: 0,
             bugCount: 0,
             contributors: new Set(),
             childIssues: [],
@@ -89,18 +102,24 @@ export default function EpicAnalysisView({
         if (!isEpicType) {
           ep.totalIssues += 1;
           ep.totalPoints += sp;
+          ep.totalHours += estH;
           totalEpicPoints += sp;
+          totalEpicHours += estH;
 
           if (isDone) {
             ep.doneIssues += 1;
             ep.donePoints += sp;
+            ep.doneHours += estH;
             completedEpicPoints += sp;
+            completedEpicHours += estH;
           } else if (isInProgress) {
             ep.inProgressIssues += 1;
             ep.inProgressPoints += sp;
+            ep.inProgressHours += estH;
           } else {
             ep.toDoIssues += 1;
             ep.toDoPoints += sp;
+            ep.toDoHours += estH;
           }
 
           if (issue.isBug) ep.bugCount += 1;
@@ -127,6 +146,10 @@ export default function EpicAnalysisView({
         donePoints: Math.round(ep.donePoints * 10) / 10,
         inProgressPoints: Math.round(ep.inProgressPoints * 10) / 10,
         toDoPoints: Math.round(ep.toDoPoints * 10) / 10,
+        totalHours: Math.round(ep.totalHours * 10) / 10,
+        doneHours: Math.round(ep.doneHours * 10) / 10,
+        inProgressHours: Math.round(ep.inProgressHours * 10) / 10,
+        toDoHours: Math.round(ep.toDoHours * 10) / 10,
         completionRate: issueCompRate,
         spCompletionRate: spCompRate,
         isAtRisk,
@@ -136,25 +159,39 @@ export default function EpicAnalysisView({
 
     list.sort((a, b) => b.totalPoints - a.totalPoints || b.totalIssues - a.totalIssues);
 
-    const overallCompRate = totalEpicPoints > 0 ? Math.round((completedEpicPoints / totalEpicPoints) * 100) : 0;
+    const overallCompRate =
+      metricMode === 'hours'
+        ? totalEpicHours > 0
+          ? Math.round((completedEpicHours / totalEpicHours) * 100)
+          : 0
+        : totalEpicPoints > 0
+        ? Math.round((completedEpicPoints / totalEpicPoints) * 100)
+        : 0;
     const orphanPoints = orphans.reduce((sum, i) => sum + (Number(i.storyPoints) || 0), 0);
+    const orphanHours = orphans.reduce((sum, i) => sum + (Number(i.estimatedHours) || 0), 0);
 
     return {
       epicsList: list,
       orphanIssues: orphans,
       epicMetrics: {
         totalEpics: list.length,
+        activeEpicsCount: list.filter((e) => e.completionRate < 100).length,
+        completedEpicsCount: list.filter((e) => e.completionRate === 100).length,
         totalEpicPoints: Math.round(totalEpicPoints * 10) / 10,
         completedEpicPoints: Math.round(completedEpicPoints * 10) / 10,
         remainingEpicPoints: Math.round((totalEpicPoints - completedEpicPoints) * 10) / 10,
+        totalEpicHours: Math.round(totalEpicHours * 10) / 10,
+        completedEpicHours: Math.round(completedEpicHours * 10) / 10,
+        remainingEpicHours: Math.round((totalEpicHours - completedEpicHours) * 10) / 10,
         overallCompRate,
         atRiskCount,
         orphanCount: orphans.length,
         orphanPoints: Math.round(orphanPoints * 10) / 10,
+        orphanHours: Math.round(orphanHours * 10) / 10,
         orphanRatio: allIssues.length > 0 ? Math.round((orphans.length / allIssues.length) * 100) : 0,
       },
     };
-  }, [allIssues]);
+  }, [allIssues, metricMode]);
 
   // Filtered Epics
   const displayedEpics = useMemo(() => {
@@ -298,7 +335,10 @@ export default function EpicAnalysisView({
             <span className="text-xs text-slate-400 font-medium">epics</span>
           </div>
           <div className="mt-1 text-xs text-indigo-400 font-semibold">
-            {epicMetrics.totalEpicPoints} <span className="text-slate-400 font-normal">Story Points total</span>
+            {metricMode === 'hours' ? `${epicMetrics.totalEpicHours}h` : `${epicMetrics.totalEpicPoints}`}{' '}
+            <span className="text-slate-400 font-normal">
+              {metricMode === 'hours' ? 'Estimated Hours total' : 'Story Points total'}
+            </span>
           </div>
         </div>
 
@@ -317,7 +357,9 @@ export default function EpicAnalysisView({
             <span className="text-xs text-slate-400 font-medium">delivered</span>
           </div>
           <div className="mt-1 text-xs text-slate-400">
-            {epicMetrics.completedEpicPoints} of {epicMetrics.totalEpicPoints} SP Done
+            {metricMode === 'hours'
+              ? `${epicMetrics.completedEpicHours}h of ${epicMetrics.totalEpicHours}h Done`
+              : `${epicMetrics.completedEpicPoints} of ${epicMetrics.totalEpicPoints} SP Done`}
           </div>
         </div>
 
@@ -331,9 +373,11 @@ export default function EpicAnalysisView({
           </div>
           <div className="mt-2 flex items-baseline gap-2">
             <span className="text-2xl font-bold text-blue-400 tracking-tight">
-              {epicMetrics.remainingEpicPoints}
+              {metricMode === 'hours' ? epicMetrics.remainingEpicHours : epicMetrics.remainingEpicPoints}
             </span>
-            <span className="text-xs text-slate-400 font-medium">SP pending</span>
+            <span className="text-xs text-slate-400 font-medium">
+              {metricMode === 'hours' ? 'h pending' : 'SP pending'}
+            </span>
           </div>
           <div className="mt-1 text-xs text-slate-400">Remaining roadmap scope</div>
         </div>
@@ -378,7 +422,7 @@ export default function EpicAnalysisView({
             <span className="text-xs text-slate-400 font-medium">tickets</span>
           </div>
           <div className="mt-1 text-xs text-amber-400/90 font-medium">
-            {epicMetrics.orphanPoints} SP unaligned to any Epic
+            {metricMode === 'hours' ? `${epicMetrics.orphanHours}h` : `${epicMetrics.orphanPoints} SP`} unaligned to any Epic
           </div>
         </div>
       </div>
@@ -430,7 +474,8 @@ export default function EpicAnalysisView({
               <ShieldAlert className="w-5 h-5 text-amber-400 shrink-0" />
               <div>
                 <h4 className="text-xs font-bold uppercase tracking-wider text-amber-300">
-                  Unaligned Work Detected: {epicMetrics.orphanCount} Orphan Tickets ({epicMetrics.orphanPoints} SP)
+                  Unaligned Work Detected: {epicMetrics.orphanCount} Orphan Tickets (
+                  {metricMode === 'hours' ? `${epicMetrics.orphanHours}h` : `${epicMetrics.orphanPoints} SP`})
                 </h4>
                 <p className="text-xs text-amber-300/80 mt-0.5">
                   These tickets do not belong to any Epic. Assigning them to an Epic ensures complete roadmap tracking.
@@ -446,8 +491,8 @@ export default function EpicAnalysisView({
           </div>
 
           {showOrphanDetails && (
-            <div className="mt-3 pt-3 border-t border-amber-500/20 max-h-48 overflow-y-auto space-y-1.5">
-              {orphanIssues.slice(0, 15).map((issue) => (
+            <div className="mt-3 pt-3 border-t border-amber-500/20 max-h-64 overflow-y-auto space-y-1.5">
+              {(showAllOrphans ? orphanIssues : orphanIssues.slice(0, 15)).map((issue) => (
                 <div
                   key={issue.key}
                   className="flex items-center justify-between text-xs py-1 px-2.5 rounded bg-slate-950/60 border border-amber-500/20"
@@ -458,13 +503,23 @@ export default function EpicAnalysisView({
                   </div>
                   <div className="flex items-center gap-3 shrink-0 ml-2">
                     <span className="text-[10px] text-slate-400">{issue.type}</span>
-                    <span className="font-semibold text-slate-200">{issue.storyPoints || 0} SP</span>
+                    <span className="font-semibold text-slate-200">
+                      {metricMode === 'hours' ? `${issue.estimatedHours || 0}h` : `${issue.storyPoints || 0} SP`}
+                    </span>
                   </div>
                 </div>
               ))}
               {orphanIssues.length > 15 && (
-                <div className="text-[11px] text-amber-400 text-center pt-1">
-                  + {orphanIssues.length - 15} more unaligned tickets
+                <div className="text-center pt-1">
+                  <button
+                    type="button"
+                    onClick={() => setShowAllOrphans(!showAllOrphans)}
+                    className="text-[11px] font-semibold text-amber-300 hover:text-amber-200 px-3 py-1 rounded bg-amber-500/20 border border-amber-500/40 transition-colors"
+                  >
+                    {showAllOrphans
+                      ? 'Show first 15 tickets'
+                      : `Show all ${orphanIssues.length} unaligned tickets (+${orphanIssues.length - 15} more)`}
+                  </button>
                 </div>
               )}
             </div>
@@ -501,7 +556,7 @@ export default function EpicAnalysisView({
                 filterMode === 'active' ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-400 hover:text-white'
               }`}
             >
-              In Progress
+              In Progress ({epicMetrics.activeEpicsCount})
             </button>
             <button
               onClick={() => setFilterMode('atRisk')}
@@ -517,7 +572,7 @@ export default function EpicAnalysisView({
                 filterMode === 'completed' ? 'bg-emerald-600 text-white shadow-sm' : 'text-slate-400 hover:text-white'
               }`}
             >
-              Completed
+              Completed ({epicMetrics.completedEpicsCount})
             </button>
           </div>
         </div>

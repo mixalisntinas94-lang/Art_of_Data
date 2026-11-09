@@ -205,7 +205,7 @@ export default function App() {
     });
   }, [allIssues, selectedType, selectedAssignee, selectedStatus, selectedPriority]);
 
-  // Derived real-time KPI metrics
+  // Derived real-time KPI metrics (strictly cross-filter and metricMode aware)
   const kpis = useMemo(() => {
     if (!analytics?.kpis) return null;
     const total = filteredIssues.length;
@@ -216,41 +216,137 @@ export default function App() {
     let inProgressSP = 0;
     let toDoSP = 0;
     let totalSP = 0;
-    let bugCount = 0;
-    let unestimatedSPCount = 0;
+    let completedHours = 0;
+    let inProgressHours = 0;
+    let toDoHours = 0;
     let totalEstHours = 0;
     let totalLoggedHours = 0;
+    let bugCount = 0;
+    let activeBugCount = 0;
+    let bugSP = 0;
+    let activeBugSP = 0;
+    let unestimatedSPCount = 0;
+    let unestimatedHoursCount = 0;
+    let liveStaleCount = 0;
+    let totalCycleTimeMs = 0;
+    let cycleTimeSampleCount = 0;
+    const activeContributorsSet = new Set();
 
     filteredIssues.forEach((issue) => {
       const isDone = issue.statusCategory === 'done';
       const isInProgress = issue.statusCategory === 'indeterminate';
       const sp = Number(issue.storyPoints) || 0;
       const isEst = issue.storyPoints !== null && issue.storyPoints !== undefined;
+      const estH = Number(issue.estimatedHours) || 0;
+      const logH = Number(issue.loggedHours) || 0;
 
       totalSP += sp;
+      totalEstHours += estH;
+      totalLoggedHours += logH;
+
       if (isDone) {
         completedCount++;
         completedSP += sp;
+        completedHours += estH;
       } else if (isInProgress) {
         inProgressCount++;
         inProgressSP += sp;
+        inProgressHours += estH;
         if (!isEst) unestimatedSPCount++;
+        if (!(estH > 0)) unestimatedHoursCount++;
       } else {
         toDoCount++;
         toDoSP += sp;
+        toDoHours += estH;
         if (!isEst) unestimatedSPCount++;
+        if (!(estH > 0)) unestimatedHoursCount++;
       }
 
-      if (Boolean(issue.isBug) || /\b(bug|defect|incident|σφάλμα|λάθος)\b/i.test(issue.type || '')) {
+      const isBugIssue =
+        Boolean(issue.isBug) ||
+        /(^|[^a-zA-Z0-9_])(bug|defect|incident|error|σφάλμα|λάθος)($|[^a-zA-Z0-9_])/i.test(
+          issue.type || ''
+        );
+      if (isBugIssue) {
         bugCount++;
+        bugSP += sp;
+        if (!isDone) {
+          activeBugCount++;
+          activeBugSP += sp;
+        }
       }
 
-      totalEstHours += issue.estimatedHours || 0;
-      totalLoggedHours += issue.loggedHours || 0;
+      // Live stale check: strictly non-done issues inactive >= 3 days
+      if (!isDone && (Boolean(issue.isStale) || (issue.daysInactive !== undefined && issue.daysInactive >= 3))) {
+        liveStaleCount++;
+      }
+
+      // Live cycle time calculation on filtered Done issues
+      if (isDone && issue.resolutiondate && issue.created) {
+        const createdMs = new Date(issue.created).getTime();
+        const resolvedMs = new Date(issue.resolutiondate).getTime();
+        if (!isNaN(createdMs) && !isNaN(resolvedMs) && resolvedMs >= createdMs) {
+          totalCycleTimeMs += resolvedMs - createdMs;
+          cycleTimeSampleCount++;
+        }
+      }
+
+      // Distinct human contributors (excluding 'Unassigned')
+      if (issue.assignee && issue.assignee !== 'Unassigned') {
+        activeContributorsSet.add(issue.accountId || issue.assignee);
+      }
     });
 
-    const completionRate = total > 0 ? Math.round((completedCount / total) * 100) : 0;
+    const ticketCompletionRate = total > 0 ? Math.round((completedCount / total) * 100) : 0;
+    const spCompletionRate = totalSP > 0 ? Math.round((completedSP / totalSP) * 100) : ticketCompletionRate;
+    const hoursCompletionRate =
+      totalEstHours > 0 ? Math.round((totalLoggedHours / totalEstHours) * 100) : ticketCompletionRate;
+
+    const completionRate =
+      metricMode === 'hours' ? hoursCompletionRate : spCompletionRate;
+
+    const doneSharePct =
+      metricMode === 'hours'
+        ? totalEstHours > 0
+          ? Math.round((completedHours / totalEstHours) * 100)
+          : ticketCompletionRate
+        : totalSP > 0
+        ? Math.round((completedSP / totalSP) * 100)
+        : ticketCompletionRate;
+
+    const inProgressSharePct =
+      metricMode === 'hours'
+        ? totalEstHours > 0
+          ? Math.round((inProgressHours / totalEstHours) * 100)
+          : total > 0
+          ? Math.round((inProgressCount / total) * 100)
+          : 0
+        : totalSP > 0
+        ? Math.round((inProgressSP / totalSP) * 100)
+        : total > 0
+        ? Math.round((inProgressCount / total) * 100)
+        : 0;
+
+    const toDoSharePct =
+      metricMode === 'hours'
+        ? totalEstHours > 0
+          ? Math.round((toDoHours / totalEstHours) * 100)
+          : total > 0
+          ? Math.round((toDoCount / total) * 100)
+          : 0
+        : totalSP > 0
+        ? Math.round((toDoSP / totalSP) * 100)
+        : total > 0
+        ? Math.round((toDoCount / total) * 100)
+        : 0;
+
     const bugRatio = total > 0 ? Math.round((bugCount / total) * 100) : 0;
+    const activeBugRatio = total > 0 ? Math.round((activeBugCount / total) * 100) : 0;
+    const bugSpRatio = totalSP > 0 ? Math.round((bugSP / totalSP) * 100) : bugRatio;
+    const avgCycleTimeDays =
+      cycleTimeSampleCount > 0
+        ? Math.round((totalCycleTimeMs / (cycleTimeSampleCount * 1000 * 60 * 60 * 24)) * 10) / 10
+        : null;
 
     return {
       totalIssues: total,
@@ -261,16 +357,32 @@ export default function App() {
       completedStoryPoints: Math.round(completedSP * 10) / 10,
       inProgressStoryPoints: Math.round(inProgressSP * 10) / 10,
       toDoStoryPoints: Math.round(toDoSP * 10) / 10,
+      completedHours: Math.round(completedHours * 10) / 10,
+      inProgressHours: Math.round(inProgressHours * 10) / 10,
+      toDoHours: Math.round(toDoHours * 10) / 10,
       completionRate,
+      ticketCompletionRate,
+      spCompletionRate,
+      hoursCompletionRate,
+      doneSharePct,
+      inProgressSharePct,
+      toDoSharePct,
       bugCount,
+      activeBugCount,
+      bugStoryPoints: Math.round(bugSP * 10) / 10,
+      activeBugStoryPoints: Math.round(activeBugSP * 10) / 10,
       bugRatio,
+      activeBugRatio,
+      bugSpRatio,
       unestimatedPointsCount: unestimatedSPCount,
+      unestimatedHoursCount,
       totalEstimatedHours: Math.round(totalEstHours * 10) / 10,
       totalLoggedHours: Math.round(totalLoggedHours * 10) / 10,
-      avgCycleTimeDays: analytics.kpis.avgCycleTimeDays,
-      staleCount: analytics.kpis.staleCount,
+      avgCycleTimeDays,
+      staleCount: liveStaleCount,
+      activeContributorsCount: activeContributorsSet.size,
     };
-  }, [analytics, filteredIssues]);
+  }, [analytics, filteredIssues, metricMode]);
 
   // Sprint Time Elapsed & Pacing Logic (null-aware when no sprint dates exist)
   const hasRealSprintDates =
@@ -281,15 +393,19 @@ export default function App() {
   const isBehindSchedule = hasRealSprintDates && paceGap > 15;
   const isSlightlyBehind = hasRealSprintDates && paceGap > 0 && paceGap <= 15;
 
-  // Count total stale / blocker issues for badge
+  // Count total stale / blocker issues for badge (strictly excluding Done issues)
   const staleIssuesCount = useMemo(() => {
-    return filteredIssues.filter((i) => i.isStale || (i.daysInactive !== undefined && i.daysInactive >= 3)).length;
+    return filteredIssues.filter(
+      (i) => i.statusCategory !== 'done' && (Boolean(i.isStale) || (i.daysInactive !== undefined && i.daysInactive >= 3))
+    ).length;
   }, [filteredIssues]);
 
   // Issues displayed in Activity Stream (respecting [All Activity] vs [⚠️ Blockers & Stale])
   const displayedStreamIssues = useMemo(() => {
     if (activityFilter === 'stale') {
-      return filteredIssues.filter((i) => i.isStale || (i.daysInactive !== undefined && i.daysInactive >= 3));
+      return filteredIssues.filter(
+        (i) => i.statusCategory !== 'done' && (Boolean(i.isStale) || (i.daysInactive !== undefined && i.daysInactive >= 3))
+      );
     }
     return filteredIssues;
   }, [filteredIssues, activityFilter]);
@@ -297,27 +413,44 @@ export default function App() {
   // Status breakdown data for Recharts PieChart
   const statusPieData = useMemo(() => {
     if (!kpis) return [];
+    const useHours = metricMode === 'hours' && kpis.totalEstimatedHours > 0;
+    const usePoints = metricMode === 'points' && kpis.totalStoryPoints > 0;
     return [
       {
         name: 'Done',
-        value: metricMode === 'points' && kpis.totalStoryPoints > 0 ? kpis.completedStoryPoints : kpis.completedCount,
+        value: usePoints
+          ? kpis.completedStoryPoints
+          : useHours
+          ? kpis.completedHours
+          : kpis.completedCount,
         color: '#10b981',
         count: kpis.completedCount,
         points: kpis.completedStoryPoints,
+        hours: kpis.completedHours,
       },
       {
         name: 'In Progress',
-        value: metricMode === 'points' && kpis.totalStoryPoints > 0 ? kpis.inProgressStoryPoints : kpis.inProgressCount,
+        value: usePoints
+          ? kpis.inProgressStoryPoints
+          : useHours
+          ? kpis.inProgressHours
+          : kpis.inProgressCount,
         color: '#3b82f6',
         count: kpis.inProgressCount,
         points: kpis.inProgressStoryPoints,
+        hours: kpis.inProgressHours,
       },
       {
         name: 'To Do',
-        value: metricMode === 'points' && kpis.totalStoryPoints > 0 ? kpis.toDoStoryPoints : kpis.toDoCount,
+        value: usePoints
+          ? kpis.toDoStoryPoints
+          : useHours
+          ? kpis.toDoHours
+          : kpis.toDoCount,
         color: '#64748b',
         count: kpis.toDoCount,
         points: kpis.toDoStoryPoints,
+        hours: kpis.toDoHours,
       },
     ].filter((item) => item.value > 0);
   }, [kpis, metricMode]);
@@ -339,21 +472,27 @@ export default function App() {
     relevantIssues.forEach((issue) => {
       const type = issue.type || 'Task';
       if (!typeMap[type]) {
-        typeMap[type] = { name: type, count: 0, points: 0 };
+        typeMap[type] = { name: type, count: 0, points: 0, hours: 0 };
       }
       typeMap[type].count += 1;
       typeMap[type].points += Number(issue.storyPoints) || 0;
+      typeMap[type].hours += Number(issue.estimatedHours) || 0;
     });
 
     const list = Object.values(typeMap).map((t) => ({
       name: t.name,
       count: t.count,
       points: Math.round(t.points * 10) / 10,
+      hours: Math.round(t.hours * 10) / 10,
     }));
 
-    list.sort((a, b) => b.points - a.points || b.count - a.count);
+    list.sort((a, b) =>
+      metricMode === 'hours'
+        ? b.hours - a.hours || b.count - a.count
+        : b.points - a.points || b.count - a.count
+    );
     return list;
-  }, [allIssues, selectedAssignee, selectedStatus]);
+  }, [allIssues, selectedAssignee, selectedStatus, metricMode]);
 
   // Assignee Effort Allocation for Horizontal Stacked Bar Chart
   const assigneeChartData = useMemo(() => {
@@ -378,30 +517,53 @@ export default function App() {
           completedPoints: 0,
           remainingPoints: 0,
           totalPoints: 0,
+          completedHours: 0,
+          remainingHours: 0,
+          totalHours: 0,
           totalTickets: 0,
         };
       }
       const sp = Number(issue.storyPoints) || 0;
+      const estH = Number(issue.estimatedHours) || 0;
+      const logH = Number(issue.loggedHours) || 0;
       map[name].totalTickets += 1;
       map[name].totalPoints += sp;
+      map[name].totalHours += estH;
       if (issue.statusCategory === 'done') {
         map[name].completedPoints += sp;
+        map[name].completedHours += logH || estH;
       } else {
         map[name].remainingPoints += sp;
+        map[name].remainingHours += Math.max(0, estH - logH);
       }
     });
 
-    const list = Object.values(map).map((item) => ({
-      ...item,
-      totalPoints: Math.round(item.totalPoints * 10) / 10,
-      completedPoints: Math.round(item.completedPoints * 10) / 10,
-      remainingPoints: Math.round(item.remainingPoints * 10) / 10,
-      isOverCapacity: item.totalPoints > 40,
-    }));
+    const list = Object.values(map).map((item) => {
+      const totalPoints = Math.round(item.totalPoints * 10) / 10;
+      const completedPoints = Math.round(item.completedPoints * 10) / 10;
+      const remainingPoints = Math.round(item.remainingPoints * 10) / 10;
+      const totalHours = Math.round(item.totalHours * 10) / 10;
+      const completedHours = Math.round(item.completedHours * 10) / 10;
+      const remainingHours = Math.round(item.remainingHours * 10) / 10;
+      return {
+        ...item,
+        totalPoints,
+        completedPoints,
+        remainingPoints,
+        totalHours,
+        completedHours,
+        remainingHours,
+        isOverCapacity: (metricMode === 'hours' ? remainingHours : remainingPoints) > 40,
+      };
+    });
 
-    list.sort((a, b) => b.totalPoints - a.totalPoints || b.totalTickets - a.totalTickets);
+    list.sort((a, b) =>
+      metricMode === 'hours'
+        ? b.totalHours - a.totalHours || b.totalTickets - a.totalTickets
+        : b.totalPoints - a.totalPoints || b.totalTickets - a.totalTickets
+    );
     return list;
-  }, [allIssues, selectedType, selectedStatus]);
+  }, [allIssues, selectedType, selectedStatus, metricMode]);
 
   return (
     <div className="min-h-screen bg-[#0b0f19] text-slate-100 p-4 md:p-6 font-sans">
@@ -653,6 +815,7 @@ export default function App() {
               analytics={analytics}
               kpis={kpis}
               metricMode={metricMode}
+              sprintScope={sprintScope}
               selectedType={selectedType}
               selectedAssignee={selectedAssignee}
               selectedStatus={selectedStatus}
@@ -682,6 +845,7 @@ export default function App() {
               <BacklogAnalysisView
                 analytics={analytics}
                 allIssues={allIssues}
+                metricMode={metricMode}
                 onUpdateIssue={handleUpdateIssue}
                 projectKey={selectedProject?.key}
               />
@@ -693,6 +857,7 @@ export default function App() {
               <EpicAnalysisView
                 analytics={analytics}
                 allIssues={allIssues}
+                metricMode={metricMode}
                 onUpdateIssue={handleUpdateIssue}
                 projectKey={selectedProject?.key}
               />
@@ -705,6 +870,7 @@ export default function App() {
                 allIssues={allIssues}
                 projects={projects}
                 selectedProject={selectedProject}
+                metricMode={metricMode}
                 onUpdateIssue={handleUpdateIssue}
               />
             </ErrorBoundary>

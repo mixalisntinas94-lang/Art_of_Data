@@ -787,6 +787,9 @@ resolver.define('getProjectAnalytics', async (req) => {
     let toDoCount = 0;
     let unassignedCount = 0;
     let bugCount = 0;
+    let activeBugCount = 0;
+    let bugStoryPoints = 0;
+    let activeBugStoryPoints = 0;
     let totalCycleTimeMs = 0;
     let cycleTimeSampleCount = 0;
 
@@ -820,6 +823,9 @@ resolver.define('getProjectAnalytics', async (req) => {
       typeMap[typeName] = (typeMap[typeName] || 0) + 1;
       if (isBug) {
         bugCount += 1;
+        if (!isDone) {
+          activeBugCount += 1;
+        }
       }
       priorityMap[priorityName] = (priorityMap[priorityName] || 0) + 1;
 
@@ -830,6 +836,12 @@ resolver.define('getProjectAnalytics', async (req) => {
 
       totalStoryPoints += issuePoints;
       typePointsMap[typeName] = (typePointsMap[typeName] || 0) + issuePoints;
+      if (isBug) {
+        bugStoryPoints += issuePoints;
+        if (!isDone) {
+          activeBugStoryPoints += issuePoints;
+        }
+      }
       if (isDone) {
         completedStoryPoints += issuePoints;
       } else if (isInProgress) {
@@ -931,12 +943,17 @@ resolver.define('getProjectAnalytics', async (req) => {
     });
 
     const totalIssues = issues.length;
-    const completionRate = totalIssues > 0 ? Math.round((completedCount / totalIssues) * 100) : 0;
+    const ticketCompletionRate = totalIssues > 0 ? Math.round((completedCount / totalIssues) * 100) : 0;
 
     // Format Story Points
     totalStoryPoints = Math.round(totalStoryPoints * 10) / 10;
     completedStoryPoints = Math.round(completedStoryPoints * 10) / 10;
     const remainingStoryPoints = Math.round((totalStoryPoints - completedStoryPoints) * 10) / 10;
+    const spCompletionRate =
+      totalStoryPoints > 0
+        ? Math.round((completedStoryPoints / totalStoryPoints) * 100)
+        : ticketCompletionRate;
+    const completionRate = spCompletionRate;
 
     // Format Hours (rounded once from total seconds)
     const totalEstimatedHours = Math.round((totalEstimatedSeconds / 3600) * 10) / 10;
@@ -944,10 +961,15 @@ resolver.define('getProjectAnalytics', async (req) => {
     const totalRemainingHours = Math.round((totalRemainingSeconds / 3600) * 10) / 10;
 
     const bugRatio = totalIssues > 0 ? Math.round((bugCount / totalIssues) * 100) : 0;
+    const bugSpRatio =
+      totalStoryPoints > 0 ? Math.round((bugStoryPoints / totalStoryPoints) * 100) : bugRatio;
     const avgCycleTimeDays =
       cycleTimeSampleCount > 0
         ? Math.round((totalCycleTimeMs / (cycleTimeSampleCount * 1000 * 60 * 60 * 24)) * 10) / 10
         : null;
+    const activeContributorsCount = Object.values(assigneeMap).filter(
+      (m) => m.name !== 'Unassigned'
+    ).length;
 
     // Format Team Members list with capacity statuses
     const teamMembers = Object.values(assigneeMap).map((m) => {
@@ -1064,13 +1086,17 @@ resolver.define('getProjectAnalytics', async (req) => {
       }
       const isBacklog = issueSprints.length === 0;
 
-      // Parent & Epic association
+      // Parent & Epic association (ensure parent is an Epic, not a Story parent of a Sub-task)
       const isEpic = typeName.toLowerCase() === 'epic';
       const parentField = fields.parent;
-      const epicKey = isEpic ? issue.key : parentField?.key || null;
+      const parentType = (parentField?.fields?.issuetype?.name || '').toLowerCase();
+      const parentIsEpic = !parentType || parentType === 'epic';
+      const epicKey = isEpic ? issue.key : parentIsEpic ? parentField?.key || null : null;
       const epicSummary = isEpic
         ? (fields.summary || issue.key)
-        : (parentField?.fields?.summary || parentField?.key || null);
+        : parentIsEpic
+        ? (parentField?.fields?.summary || parentField?.key || null)
+        : null;
 
       const pointsNum = issuePoints || 0;
 
@@ -1129,8 +1155,8 @@ resolver.define('getProjectAnalytics', async (req) => {
         orphanIssuesPoints += pointsNum;
       }
 
-      // Accumulate Backlog metrics (tickets not in any sprint and not done)
-      if (isBacklog && !isDone) {
+      // Accumulate Backlog metrics (tickets not in any sprint and not done, excluding Epics)
+      if (isBacklog && !isDone && !isEpic) {
         backlogTotalItems += 1;
         backlogTotalPoints += pointsNum;
         if (issuePoints !== null && issuePoints !== undefined && issuePoints > 0) {
@@ -1255,6 +1281,8 @@ resolver.define('getProjectAnalytics', async (req) => {
         inProgressCount,
         toDoCount,
         completionRate,
+        ticketCompletionRate,
+        spCompletionRate,
         totalStoryPoints,
         completedStoryPoints,
         inProgressStoryPoints: Math.round(inProgressStoryPoints * 10) / 10,
@@ -1266,8 +1294,13 @@ resolver.define('getProjectAnalytics', async (req) => {
         totalRemainingHours,
         unestimatedHoursCount,
         bugRatio,
+        bugSpRatio,
         bugCount,
+        activeBugCount,
+        bugStoryPoints: Math.round(bugStoryPoints * 10) / 10,
+        activeBugStoryPoints: Math.round(activeBugStoryPoints * 10) / 10,
         avgCycleTimeDays,
+        activeContributorsCount,
         unassignedCount,
         staleCount: staleIssues.length,
       },
